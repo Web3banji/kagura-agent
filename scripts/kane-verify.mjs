@@ -18,7 +18,7 @@ const FLOWS = {
   "shell-nav": {
     flow: "shell-nav",
     objective:
-      'Go to the provided URL. Verify the page shows "ECHOLOG" and "Command Center". Click the "Agent Journal" link in the sidebar navigation and verify the Agent Journal page is displayed. Click the "Verification Lab" link and verify the Verification Lab page is displayed. Click the "Published Stories" link and verify the Published Stories page is displayed. Return to "Command Center" and verify it is displayed.',
+      'Go to the provided URL. Verify the page shows "KAGURA" and "Home & status". Click the "Activity history" link in the sidebar navigation and verify the Activity history page is displayed. Click the "Checks & tests" link in the sidebar navigation and verify the Checks & tests page is displayed. Click the "Published stories" link in the sidebar navigation and verify the Stories page is displayed. Return to "Home & status" and verify it is displayed.',
   },
 };
 

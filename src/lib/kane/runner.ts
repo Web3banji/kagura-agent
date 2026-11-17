@@ -22,6 +22,11 @@ function mapOutcome(exitCode: number | null, runEndStatus?: string): Verificatio
   return "blocked";
 }
 
+function shellQuoteArg(a: string): string {
+  if (/^[A-Za-z0-9_\-./:\\=@]+$/.test(a)) return a;
+  return `"${a.replace(/"/g, '\\"')}"`;
+}
+
 export async function runKane(options: RunKaneOptions): Promise<KaneRunResult> {
   const outDir = path.join(process.cwd(), "data", "verification", "runs");
   await fs.mkdir(outDir, { recursive: true });
@@ -29,10 +34,9 @@ export async function runKane(options: RunKaneOptions): Promise<KaneRunResult> {
   const ndjsonPath = path.join(outDir, `${id}.ndjson`);
 
   let resolvedProfile: string | undefined;
-  if (options.chromeProfile) {
-    resolvedProfile = path.isAbsolute(options.chromeProfile)
-      ? options.chromeProfile
-      : path.resolve(process.cwd(), options.chromeProfile);
+  const profileInput = options.chromeProfile || process.env.KANE_BROWSER_PROFILE || path.join(process.cwd(), "data", "verification", "kane-chrome-profile");
+  if (profileInput) {
+    resolvedProfile = path.isAbsolute(profileInput) ? profileInput : path.resolve(process.cwd(), profileInput);
     await fs.mkdir(resolvedProfile, { recursive: true });
   }
 
@@ -42,6 +46,8 @@ export async function runKane(options: RunKaneOptions): Promise<KaneRunResult> {
   if (options.timeoutSeconds) args.push("--timeout", String(options.timeoutSeconds));
   if (options.name) args.push("--name", options.name);
   if (resolvedProfile) args.push("--chrome-profile", resolvedProfile);
+
+  const command = `KANE_CLI_USER_AGENT=kilocode kane-cli ${args.map(shellQuoteArg).join(" ")}`;
 
   return await new Promise<KaneRunResult>((resolve) => {
     const isWin = process.platform === "win32";
@@ -65,11 +71,16 @@ export async function runKane(options: RunKaneOptions): Promise<KaneRunResult> {
     child.on("error", async (err) => {
       await fs.writeFile(ndjsonPath, "", "utf8").catch(() => undefined);
       resolve({
+        id,
+        flow: options.name,
+        objective: options.objective,
+        url: options.url,
         outcome: "did_not_start",
         exitCode: 2,
         summary: `Failed to start kane-cli: ${err.message}`,
         stderr,
         ndjsonPath,
+        command,
       });
     });
 
@@ -102,6 +113,10 @@ export async function runKane(options: RunKaneOptions): Promise<KaneRunResult> {
 
       const evidenceMatch = stderr.match(/(\S+\.evidence\b)/i);
       resolve({
+        id,
+        flow: options.name,
+        objective: options.objective,
+        url: options.url,
         outcome,
         exitCode: code,
         summary: typeof runEnd?.summary === "string" ? (runEnd.summary as string) : undefined,
@@ -115,6 +130,7 @@ export async function runKane(options: RunKaneOptions): Promise<KaneRunResult> {
         runEnd,
         stderr: stderr || undefined,
         ndjsonPath,
+        command,
       });
     });
   });

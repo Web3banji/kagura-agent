@@ -1,29 +1,49 @@
-import { promises as fs } from "fs";
-import path from "path";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import type { JournalEvent } from "@/types/journal";
 import type { VerificationRecord } from "@/types/verification";
 
-export async function getRecentLocalCommits(limit = 5): Promise<JournalEvent[]> {
+const execFileAsync = promisify(execFile);
+
+export interface CommitInfo {
+  sha: string;
+  shortSha: string;
+  message: string;
+  date: string;
+  author: string;
+}
+
+export async function getRecentCommits(limit = 10): Promise<CommitInfo[]> {
   try {
-    const head = await fs.readFile(path.join(process.cwd(), ".git", "logs", "HEAD"), "utf8");
-    const lines = head.trim().split(/\r?\n/).reverse().slice(0, limit);
-    return lines.map((line, i) => {
-      const parts = line.split("\t");
-      const msg = parts[1] || "commit";
-      const tsMatch = line.match(/\s(\d{10})\s[+-]\d{4}\t/);
-      const ts = tsMatch ? new Date(Number(tsMatch[1]) * 1000).toISOString() : new Date().toISOString();
-      return {
-        id: `local-${i}-${ts}`,
-        type: "commit" as const,
-        source: "local-git",
-        title: msg.trim(),
-        summary: "Observed from local git reflog (real repository history).",
-        timestamp: ts,
-      };
-    });
+    const { stdout } = await execFileAsync(
+      "git",
+      ["log", `-${limit}`, "--pretty=format:%H|%h|%s|%cI|%an"],
+      { cwd: process.cwd(), windowsHide: true },
+    );
+    return stdout
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => {
+        const [sha, shortSha, message, date, author] = line.split("|");
+        return { sha, shortSha, message, date, author };
+      });
   } catch {
     return [];
   }
+}
+
+export async function getRecentLocalCommits(limit = 5): Promise<JournalEvent[]> {
+  const commits = await getRecentCommits(limit);
+  return commits.map((c) => ({
+    id: `commit-${c.sha}`,
+    type: "commit" as const,
+    source: "git",
+    title: c.message,
+    summary: `${c.shortSha} by ${c.author} (real repository history)`,
+    timestamp: c.date,
+    refs: [c.shortSha],
+  }));
 }
 
 export function verificationToJournal(record: VerificationRecord): JournalEvent {
@@ -34,6 +54,6 @@ export function verificationToJournal(record: VerificationRecord): JournalEvent 
     title: `${record.flow}: ${record.outcome}`,
     summary: record.summary || "Kane verification executed.",
     timestamp: record.finishedAt || record.startedAt,
-    refs: [record.evidencePath, record.testUrl, record.sessionDir].filter(Boolean) as string[],
+    refs: [record.evidencePath, record.testUrl, record.sessionDir, record.ndjsonPath].filter(Boolean) as string[],
   };
 }

@@ -25,10 +25,29 @@ export async function readVerificationRecords(): Promise<VerificationRecord[]> {
   }
 }
 
-export async function appendVerificationRecord(record: VerificationRecord) {
+export async function writeVerificationRecords(records: VerificationRecord[]): Promise<void> {
+  await ensureStore();
+  await fs.writeFile(RECORDS_FILE, JSON.stringify(records, null, 2), "utf8");
+}
+
+export async function appendVerificationRecord(record: VerificationRecord): Promise<VerificationRecord> {
   const records = await readVerificationRecords();
   records.unshift(record);
-  await fs.writeFile(RECORDS_FILE, JSON.stringify(records, null, 2), "utf8");
+  await writeVerificationRecords(records);
+  return record;
+}
+
+export async function upsertVerificationRecord(record: VerificationRecord): Promise<VerificationRecord> {
+  const records = await readVerificationRecords();
+  const idx = records.findIndex((r) => r.id === record.id);
+  if (idx >= 0) records[idx] = record;
+  else records.unshift(record);
+  await writeVerificationRecords(records);
+  return record;
+}
+
+export async function getVerificationRecord(id: string): Promise<VerificationRecord | undefined> {
+  return (await readVerificationRecords()).find((r) => r.id === id);
 }
 
 export function summarizeOutcome(records: VerificationRecord[]): {

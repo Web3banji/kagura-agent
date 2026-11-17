@@ -1,11 +1,11 @@
-# ECHOLOG
+# KAGURA
 
-ECHOLOG — an autonomous development agent that verifies its work with Kane CLI and publishes factual stories about its own evolution.
+KAGURA — an autonomous development agent that verifies its work with Kane CLI and publishes factual stories about its own evolution.
 
 > **Status:** repository and environment preparation in progress. Integrations (GitHub observation, PostgreSQL, AI provider, Kane-authenticated browser verification) are not yet configured and no application features are claimed complete.
 
 ## What this project is
-ECHOLOG is intended to implement a genuine agent workflow:
+KAGURA is intended to implement a genuine agent workflow:
 
 `OBSERVE → ANALYSE → VERIFY → WRITE → REVIEW → PUBLISH`
 

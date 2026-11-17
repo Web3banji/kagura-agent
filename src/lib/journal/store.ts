@@ -24,3 +24,9 @@ export async function readJournalEvents(): Promise<JournalEvent[]> {
     return [];
   }
 }
+
+export async function appendJournalEvent(event: JournalEvent): Promise<void> {
+  const events = await readJournalEvents();
+  events.unshift(event);
+  await fs.writeFile(EVENTS_FILE, JSON.stringify(events, null, 2), "utf8");
+}
