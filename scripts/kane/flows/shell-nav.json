@@ -1,0 +1,6 @@
+{
+  "flow": "shell-nav",
+  "description": "Verifies ECHOLOG application shell, branding, and sidebar navigation across core foundation pages.",
+  "url_note": "Provide the real running application URL via --url.",
+  "objective": "Go to the provided URL. Verify the page shows \"ECHOLOG\" and \"Command Center\". Click the \"Agent Journal\" link in the sidebar navigation and verify the Agent Journal page is displayed. Click the \"Verification Lab\" link and verify the Verification Lab page is displayed. Click the \"Published Stories\" link and verify the Published Stories page is displayed. Return to \"Command Center\" and verify it is displayed."
+}
