@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
+import { JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 
 const geistSans = localFont({
@@ -12,11 +13,20 @@ const geistMono = localFont({
   variable: "--font-geist-mono",
   weight: "100 900",
 });
+const jetbrainsMono = JetBrains_Mono({
+  subsets: ["latin"],
+  variable: "--font-jetbrains-mono",
+  weight: ["400", "500", "700"],
+});
 
 export const metadata: Metadata = {
   title: "KAGURA",
   description:
     "KAGURA is an autonomous development agent that verifies its work with Kane CLI and publishes factual stories about its own evolution.",
+  icons: {
+    icon: "/brand/chibi-wagasa-anime-emblem.png",
+    apple: "/brand/chibi-wagasa-anime-emblem.png",
+  },
 };
 
 export default function RootLayout({
@@ -25,8 +35,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+    <html lang="en" className="dark">
+      <body className={`${geistSans.variable} ${geistMono.variable} ${jetbrainsMono.variable} antialiased`}>
         {children}
       </body>
     </html>

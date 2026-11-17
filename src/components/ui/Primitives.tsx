@@ -4,16 +4,19 @@ export function PageHeader({
   title,
   subtitle,
   actions,
+  eyebrow = "KAGURA / Console",
 }: {
   title: string;
   subtitle?: string;
   actions?: React.ReactNode;
+  eyebrow?: string;
 }) {
   return (
-    <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between mb-6 md:mb-8">
+    <div className="flex flex-col gap-5 md:flex-row md:items-end md:justify-between mb-7 md:mb-10 pb-5 border-b border-border/80">
       <div className="min-w-0">
-        <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">{title}</h1>
-        {subtitle ? <p className="mt-2 text-sm text-muted max-w-2xl">{subtitle}</p> : null}
+        <div className="k-label mb-2 text-accent/90">{eyebrow}</div>
+        <h1 className="text-3xl md:text-4xl font-semibold tracking-tight text-fg">{title}</h1>
+        {subtitle ? <p className="mt-2 text-sm md:text-[15px] text-muted max-w-3xl leading-relaxed">{subtitle}</p> : null}
       </div>
       {actions ? <div className="flex flex-wrap gap-2 shrink-0">{actions}</div> : null}
     </div>
@@ -32,20 +35,22 @@ export function Panel({
   className?: string;
 }) {
   return (
-    <section className={`rounded-xl border border-border bg-panel/70 shadow-soft p-4 md:p-5 ${className}`}>
-      {title ? <h2 className="text-sm font-medium text-fg">{title}</h2> : null}
-      {description ? <p className="mt-1 text-xs text-muted">{description}</p> : null}
-      <div className={title || description ? "mt-3" : ""}>{children}</div>
+    <section className={`relative overflow-hidden rounded-xl border border-border/90 bg-panel/80 backdrop-blur-sm shadow-soft p-4 md:p-5 ${className}`}>
+      <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent/30 to-transparent" />
+      {title ? <h2 className="text-[13px] font-tech uppercase tracking-[0.14em] text-fg/95">{title}</h2> : null}
+      {description ? <p className="mt-1.5 text-xs text-muted leading-relaxed">{description}</p> : null}
+      <div className={title || description ? "mt-4" : ""}>{children}</div>
     </section>
   );
 }
 
 export function EmptyState({ title, detail, action }: { title: string; detail: string; action?: React.ReactNode }) {
   return (
-    <div className="rounded-lg border border-dashed border-border bg-panel-2/40 p-5 md:p-6">
+    <div className="rounded-lg border border-dashed border-border-strong bg-panel-2/30 p-5 md:p-7 text-center">
+      <div className="k-label mb-2 text-accent/70">Empty</div>
       <div className="text-sm font-medium text-fg">{title}</div>
-      <div className="mt-1 text-sm text-muted leading-relaxed">{detail}</div>
-      {action ? <div className="mt-4">{action}</div> : null}
+      <div className="mt-2 text-sm text-muted leading-relaxed max-w-xl mx-auto">{detail}</div>
+      {action ? <div className="mt-4 flex justify-center">{action}</div> : null}
     </div>
   );
 }
@@ -59,17 +64,17 @@ export function WorkflowStrip({ current, compact = false }: { current?: string; 
         return (
           <li
             key={s.id}
-            className={`rounded-lg border px-2.5 py-2 text-left ${
+            className={`rounded-lg border px-2.5 py-2.5 text-left transition ${
               active
-                ? "border-accent/50 bg-accent-soft"
+                ? "border-accent/50 bg-accent-soft shadow-glow"
                 : past
                   ? "border-emerald-500/30 bg-emerald-500/5"
-                  : "border-border bg-panel-2/30"
+                  : "border-border bg-panel-2/20"
             }`}
             title={s.detail}
           >
-            <div className="text-[11px] text-muted">Step {i + 1}</div>
-            <div className={`text-xs font-medium mt-0.5 ${active ? "text-accent" : "text-fg"}`}>{s.label}</div>
+            <div className="k-label !text-[10px]">Step {String(i + 1).padStart(2, "0")}</div>
+            <div className={`text-xs font-medium mt-1 ${active ? "text-accent" : "text-fg"}`}>{s.label}</div>
             {!compact ? <div className="text-[11px] text-muted mt-1 leading-snug">{s.detail}</div> : null}
           </li>
         );

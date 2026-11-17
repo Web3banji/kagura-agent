@@ -38,7 +38,7 @@ export function ObserveButton() {
       <button
         onClick={observe}
         disabled={busy}
-        className="px-3 py-2 rounded-md border border-border bg-panel-2 text-sm hover:border-accent/40 disabled:opacity-50 w-full md:w-auto"
+        className="px-4 py-2.5 rounded-md border border-border-strong bg-panel-2/60 font-tech uppercase tracking-[0.12em] text-[11px] text-fg hover:border-accent/40 hover:bg-accent/5 disabled:opacity-50 w-full md:w-auto"
         data-action="observe-repo"
       >
         {busy ? "Checking..." : "Check for changes"}

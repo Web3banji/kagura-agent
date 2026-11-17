@@ -39,7 +39,7 @@ export function RerunVerificationButton() {
       <button
         onClick={run}
         disabled={busy}
-        className="w-full md:w-auto px-4 py-2.5 rounded-md bg-accent text-black font-semibold text-sm hover:opacity-90 disabled:opacity-50"
+        className="w-full md:w-auto px-4 py-2.5 rounded-md bg-accent text-black font-tech uppercase tracking-[0.12em] text-xs font-bold hover:brightness-110 disabled:opacity-50 shadow-glow"
         data-action="rerun-verification"
       >
         {busy ? "Testing..." : "Run a test now"}

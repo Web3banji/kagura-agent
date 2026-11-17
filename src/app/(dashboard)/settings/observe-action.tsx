@@ -20,7 +20,7 @@ export function ObserveAction() {
   }
   return (
     <div className="flex flex-wrap items-center gap-3 mt-3">
-      <button onClick={run} disabled={busy} className="px-3 py-1.5 rounded border border-border bg-panel-2 text-xs hover:border-accent/40 disabled:opacity-50" data-action="observe-repo-settings">
+      <button onClick={run} disabled={busy} className="px-3 py-2 rounded-md border border-border-strong bg-panel-2/60 font-tech uppercase tracking-[0.12em] text-[11px] hover:border-accent/40 hover:text-accent disabled:opacity-50" data-action="observe-repo-settings">
         {busy ? "Checking..." : "Check for changes now"}
       </button>
       {msg ? <span className="text-xs text-emerald-300">{msg}</span> : null}

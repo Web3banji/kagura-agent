@@ -38,7 +38,7 @@ export function RunPipelineButton() {
       <button
         onClick={run}
         disabled={running}
-        className="px-4 py-2.5 rounded-md bg-accent text-black font-semibold text-sm hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed shadow-soft w-full md:w-auto"
+        className="px-4 py-2.5 rounded-md bg-accent text-black font-tech uppercase tracking-[0.12em] text-xs font-bold hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed shadow-glow w-full md:w-auto"
         data-action="run-pipeline"
       >
         {running ? "Working..." : "Start a new check"}

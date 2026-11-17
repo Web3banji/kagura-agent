@@ -1,17 +1,21 @@
+import Image from "next/image";
 import Link from "next/link";
 import { Sidebar } from "./Sidebar";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="min-h-screen md:flex">
+    <div className="min-h-screen md:flex bg-transparent">
       <Sidebar />
       <div className="flex-1 min-w-0 flex flex-col">
-        <header className="md:hidden border-b border-border bg-panel/60 backdrop-blur px-4 py-2 flex items-center justify-between">
-          <Link href="/command-center" className="text-xs tracking-[0.2em] text-accent uppercase font-medium">KAGURA</Link>
-          <Link href="/stories" className="text-xs text-muted hover:text-fg border border-border rounded px-2.5 py-1">View stories</Link>
+        <header className="md:hidden sticky top-0 z-20 border-b border-border bg-black/50 backdrop-blur-md px-4 py-3 flex items-center justify-between">
+          <Link href="/command-center" className="flex items-center gap-2.5">
+            <Image src="/brand/chibi-wagasa-anime-emblem.png" alt="KAGURA logo" width={28} height={28} className="rounded-sm ring-1 ring-border-strong" />
+            <span className="font-tech text-xs tracking-[0.22em] text-accent uppercase">KAGURA</span>
+          </Link>
+          <Link href="/stories" className="font-tech text-[11px] uppercase tracking-[0.14em] text-muted hover:text-fg border border-border rounded px-2.5 py-1.5">Stories</Link>
         </header>
         <main className="flex-1 min-w-0">
-          <div className="max-w-6xl mx-auto px-4 md:px-8 py-6 md:py-8">{children}</div>
+          <div className="max-w-[1200px] mx-auto px-4 md:px-8 lg:px-10 py-6 md:py-10">{children}</div>
         </main>
       </div>
     </div>
