@@ -1,7 +1,10 @@
 import { timingSafeEqual } from "crypto";
 
 export function getRunnerToken(): string | undefined {
-  return process.env.KAGURA_RUNNER_TOKEN || undefined;
+  const v = process.env.KAGURA_RUNNER_TOKEN;
+  if (v == null) return undefined;
+  const t = v.trim();
+  return t === "" ? undefined : t;
 }
 
 export function runnerAuthConfigured(): boolean {
@@ -21,15 +24,42 @@ function safeEqual(a: string, b: string): boolean {
 
 export function isRunnerAuthorized(req: Request): boolean {
   const token = getRunnerToken();
-  if (!token) return false;
-  const auth = req.headers.get("authorization") || "";
-  let provided = "";
-  if (auth.toLowerCase().startsWith("bearer ")) provided = auth.slice(7).trim();
-  if (!provided) {
-    provided = (req.headers.get("x-runner-token") || req.headers.get("x-kagura-runner-token") || "").trim();
+  const authHeader = req.headers.get("authorization");
+  const hasAuthHeader = authHeader != null && authHeader !== "";
+  const bearerPrefixValid =
+    hasAuthHeader && authHeader.toLowerCase().startsWith("bearer ") && authHeader.length > 7;
+
+  if (!token) {
+    console.warn("[runner-auth] auth_failed reason=config_missing_token env=KAGURA_RUNNER_TOKEN_present=false");
+    return false;
   }
-  if (!provided) return false;
-  return safeEqual(provided, token);
+  if (!hasAuthHeader) {
+    console.warn(
+      "[runner-auth] auth_failed reason=missing_authorization_header bearer_prefix_valid=false config_token_present=true",
+    );
+    return false;
+  }
+  if (!bearerPrefixValid) {
+    console.warn(
+      "[runner-auth] auth_failed reason=invalid_bearer_prefix bearer_prefix_valid=false config_token_present=true has_authorization_header=true",
+    );
+    return false;
+  }
+  const provided = authHeader.slice(7).trim();
+  if (!provided) {
+    console.warn(
+      "[runner-auth] auth_failed reason=empty_bearer_token_after_trim bearer_prefix_valid=true config_token_present=true",
+    );
+    return false;
+  }
+  const ok = safeEqual(provided, token);
+  if (!ok) {
+    console.warn(
+      "[runner-auth] auth_failed reason=token_mismatch bearer_prefix_valid=true config_token_present=true lengths_match=%s",
+      provided.length === token.length,
+    );
+  }
+  return ok;
 }
 
 export function runnerUnauthorized(message = "Unauthorized runner"): Response {
