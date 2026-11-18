@@ -21,7 +21,7 @@ async function resolveProjectId(): Promise<string> {
 
 export async function POST(req: Request) {
   try {
-    const principal = getRequestPrincipal(req);
+    const principal = (await getRequestPrincipal(req));
     if (!principal.authorized) return unauthorizedResponse(principal.reason || "Unauthorized");
 
     const body = (await req.json().catch(() => ({}))) as { flow?: string; url?: string; objective?: string };

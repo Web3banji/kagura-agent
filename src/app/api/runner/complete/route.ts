@@ -60,10 +60,19 @@ export async function POST(req: Request) {
     const job = await getJob(body.jobId.trim());
     if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
 
-    const caller = (typeof body.runnerId === "string" && body.runnerId) || (typeof body.claimedBy === "string" && body.claimedBy) || "";
+    const statedRunnerId = typeof body.runnerId === "string" && body.runnerId ? body.runnerId : "";
+    const statedClaimedBy = typeof body.claimedBy === "string" && body.claimedBy ? body.claimedBy : "";
+    const caller = statedRunnerId || statedClaimedBy;
     if (!job.claimedBy || !caller || job.claimedBy !== caller) {
       return NextResponse.json({ error: "Job is not claimed by this runner" }, { status: 403 });
     }
+    // When the payload names a runner explicitly it must be the runner that claimed the job,
+    // so a second runner instance cannot complete a job it does not own.
+    if (statedRunnerId && job.claimedBy !== statedRunnerId) {
+      return NextResponse.json({ error: "Job is not claimed by this runner" }, { status: 403 });
+    }
+    // The job owner recorded at enqueue time is authoritative; never trust a client-supplied owner.
+    const owner = job.requestedBy || "";
     if (job.status !== "claimed" && job.status !== "running") {
       return NextResponse.json({ error: "Job is not in a completable state", status: job.status }, { status: 409 });
     }
@@ -115,9 +124,9 @@ export async function POST(req: Request) {
       source: "runner",
       jobId: job.id,
       projectId: job.projectId,
-      requestedBy: job.requestedBy,
+      requestedBy: owner,
     };
-    await upsertVerificationRecord(record);
+    await upsertVerificationRecord(record, { expectOwner: owner });
 
     const jobStatus = terminalJobStatus(outcome);
     const updated = await updateJob(job.id, {

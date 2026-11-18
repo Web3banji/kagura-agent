@@ -1,13 +1,18 @@
 import type { VerificationOutcome, VerificationRecord } from "@/types/verification";
 import { promises as fs } from "fs";
 import path from "path";
-import { hasDatabase, kvGet, kvSet } from "@/lib/db";
+import { hasDatabase, isProductionRuntime, kvGet, kvSet } from "@/lib/db";
+import { AccessDeniedError } from "@/lib/auth/scope";
 
 const DATA_DIR = path.join(process.cwd(), "data", "verification");
 const LEGACY_RECORDS_FILE = path.join(DATA_DIR, "records.json");
 
 function recordsKey(projectId?: string) {
   return `verification:records:${projectId || "default"}`;
+}
+
+function canUseLocalFs(): boolean {
+  return !hasDatabase() && !isProductionRuntime();
 }
 
 async function ensureDir() {
@@ -72,6 +77,7 @@ async function writeDbRecords(records: VerificationRecord[], projectId?: string)
 }
 
 async function readFileRecords(): Promise<VerificationRecord[]> {
+  if (!canUseLocalFs()) return [];
   await ensureDir();
   try {
     const raw = await fs.readFile(LEGACY_RECORDS_FILE, "utf8");
@@ -86,6 +92,9 @@ async function readFileRecords(): Promise<VerificationRecord[]> {
 }
 
 async function writeFileRecords(records: VerificationRecord[]): Promise<void> {
+  if (!canUseLocalFs()) {
+    throw new Error("Durable verification record storage is not configured (DATABASE_URL missing in production).");
+  }
   await ensureDir();
   await fs.writeFile(LEGACY_RECORDS_FILE, JSON.stringify(records, null, 2), "utf8");
 }
@@ -93,19 +102,36 @@ async function writeFileRecords(records: VerificationRecord[]): Promise<void> {
 export async function readVerificationRecords(opts?: { projectId?: string; requestedBy?: string; includeLegacy?: boolean }): Promise<VerificationRecord[]> {
   const projectId = opts?.projectId;
   const requestedBy = opts?.requestedBy;
+  const includeLegacy = opts?.includeLegacy === true;
   let records: VerificationRecord[];
   if (hasDatabase()) {
     const primary = await readDbRecords(projectId);
-    const legacy = opts?.includeLegacy === false ? [] : await readLegacyVerificationRecords();
+    const legacy = includeLegacy ? await readLegacyVerificationRecords() : [];
     records = mergeUnique(primary, legacy);
   } else {
-    records = await readFileRecords();
+    records = includeLegacy ? await readLegacyVerificationRecords() : await readFileRecords();
   }
-  return records.filter((r) => {
-    if (projectId && r.projectId && r.projectId !== projectId) return false;
-    if (requestedBy && r.requestedBy && r.requestedBy !== requestedBy) return false;
-    return true;
-  });
+  return records.filter((r) => matchesRecordScope(r, { projectId, requestedBy, includeLegacy }));
+}
+
+/**
+ * Fails closed. A principal constrained to its own identity never sees records owned
+ * by someone else, and only sees ownerless (legacy/platform) records when
+ * `includeLegacy` is explicitly granted.
+ */
+function matchesRecordScope(
+  record: VerificationRecord,
+  opts: { projectId?: string; requestedBy?: string; includeLegacy: boolean },
+): boolean {
+  if (opts.projectId) {
+    if (record.projectId && record.projectId !== opts.projectId) return false;
+    if (!record.projectId && !opts.includeLegacy) return false;
+  }
+  if (opts.requestedBy) {
+    if (record.requestedBy && record.requestedBy !== opts.requestedBy) return false;
+    if (!record.requestedBy && !opts.includeLegacy) return false;
+  }
+  return true;
 }
 
 export async function writeVerificationRecords(records: VerificationRecord[], projectId?: string): Promise<void> {
@@ -130,20 +156,49 @@ export async function appendVerificationRecord(record: VerificationRecord): Prom
   return record;
 }
 
-export async function upsertVerificationRecord(record: VerificationRecord): Promise<VerificationRecord> {
+/**
+ * Insert or replace a verification record.
+ *
+ * When `opts.expectOwner` is supplied (the runner passes the owner recorded on the
+ * claimed job), the stored owner is authoritative: a record owned by a different
+ * principal can never be overwritten, and a create can never assign a different
+ * owner. This prevents a completion payload from re-attributing a record.
+ */
+export async function upsertVerificationRecord(
+  record: VerificationRecord,
+  opts?: { expectOwner?: string },
+): Promise<VerificationRecord> {
   const projectId = record.projectId;
+  const expectOwner = typeof opts?.expectOwner === "string" && opts.expectOwner ? opts.expectOwner : undefined;
+
+  const merge = (existing: VerificationRecord | undefined, incoming: VerificationRecord): VerificationRecord => {
+    if (existing) {
+      const existingOwner = existing.requestedBy ?? undefined;
+      if (expectOwner && existingOwner && existingOwner !== expectOwner) {
+        throw new AccessDeniedError("Verification record is owned by another principal");
+      }
+      // Never allow the owner to be changed by a completion payload.
+      const owner = expectOwner ?? existingOwner ?? incoming.requestedBy;
+      return { ...existing, ...incoming, requestedBy: owner };
+    }
+    if (expectOwner && incoming.requestedBy && incoming.requestedBy !== expectOwner) {
+      throw new AccessDeniedError("Verification record owner does not match the claimed job");
+    }
+    return { ...incoming, requestedBy: expectOwner ?? incoming.requestedBy };
+  };
+
   if (hasDatabase()) {
     const records = await readDbRecords(projectId);
     const idx = records.findIndex((r) => r.id === record.id || (record.jobId && r.jobId === record.jobId));
-    if (idx >= 0) records[idx] = { ...records[idx], ...record };
-    else records.unshift(record);
+    if (idx >= 0) records[idx] = merge(records[idx], record);
+    else records.unshift(merge(undefined, record));
     await writeDbRecords(records, projectId);
     return record;
   }
   const records = await readFileRecords();
   const idx = records.findIndex((r) => r.id === record.id || (record.jobId && r.jobId === record.jobId));
-  if (idx >= 0) records[idx] = { ...records[idx], ...record };
-  else records.unshift(record);
+  if (idx >= 0) records[idx] = merge(records[idx], record);
+  else records.unshift(merge(undefined, record));
   await writeFileRecords(records);
   return record;
 }

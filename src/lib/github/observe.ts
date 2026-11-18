@@ -146,7 +146,12 @@ export async function observeGitHub(): Promise<GitHubObservationResult> {
       lastError: undefined,
       lastNewCount: newCommits.length,
     };
-    await writeObservationState(nextState);
+    try {
+      await writeObservationState(nextState);
+    } catch (persistErr) {
+      const pmsg = persistErr instanceof Error ? persistErr.message : String(persistErr);
+      throw new Error(`Observation succeeded but failed to persist state: ${pmsg}`);
+    }
 
     return {
       repo: slug,
@@ -160,7 +165,20 @@ export async function observeGitHub(): Promise<GitHubObservationResult> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const failedState = { ...state, lastObservedAt: observedAt, lastStatus: "failed" as const, lastError: msg };
-    await writeObservationState(failedState);
+    try {
+      await writeObservationState(failedState);
+    } catch (persistErr) {
+      const pmsg = persistErr instanceof Error ? persistErr.message : String(persistErr);
+      return {
+        repo: slug,
+        source: hasToken() ? "github-api" : "git-local",
+        commits: [],
+        newCommits: [],
+        state: { ...failedState, lastError: `${msg} (also failed to persist state: ${pmsg})` },
+        observedAt,
+        error: `${msg} (also failed to persist state: ${pmsg})`,
+      };
+    }
     return {
       repo: slug,
       source: hasToken() ? "github-api" : "git-local",

@@ -27,6 +27,7 @@ export async function generateDraft(
   observation: DraftObservation,
   analysis: DraftAnalysis,
   verification: VerificationRecord | null,
+  opts?: { userId?: string | null },
 ): Promise<Story> {
   const now = new Date().toISOString();
   const commits: StoryCommit[] = observation.commits.slice(0, 10).map((c) => ({
@@ -61,6 +62,7 @@ export async function generateDraft(
     subtitle: article.subtitle,
     body: article.body,
     status: "review",
+    userId: opts?.userId ?? null,
     createdAt: now,
     updatedAt: now,
     generationSource: article.source,

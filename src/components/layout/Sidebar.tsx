@@ -13,7 +13,9 @@ const nav = [
   { href: "/settings", label: "Settings", hint: "Connections and setup", code: "06" },
 ];
 
-export function Sidebar() {
+type ShellUser = { name?: string | null; email?: string | null; githubLogin?: string | null } | null;
+
+export function Sidebar({ currentUser = null, adminTokenAccess = false }: { currentUser?: ShellUser; adminTokenAccess?: boolean }) {
   const pathname = usePathname();
   return (
     <aside className="w-full md:w-72 md:min-h-screen border-b md:border-b-0 md:border-r border-border bg-black/30 backdrop-blur-md md:sticky md:top-0 flex flex-col">
@@ -64,6 +66,21 @@ export function Sidebar() {
       <div className="hidden md:block p-4 mt-auto text-xs text-muted border-t border-border">
         <div className="k-label text-accent/80 mb-2">Pipeline</div>
         <p className="leading-relaxed">Check for changes → understand → test → write → you review → publish.</p>
+        <div className="mt-3 pt-3 border-t border-border/70">
+          {currentUser ? (
+            <>
+              <div className="text-[11px] text-fg/90 truncate">{currentUser.name || currentUser.githubLogin || currentUser.email || "Signed in"}</div>
+              {currentUser.email || currentUser.githubLogin ? (
+                <div className="text-[11px] text-muted truncate">{currentUser.githubLogin ? `@${currentUser.githubLogin}` : currentUser.email}</div>
+              ) : null}
+              <form action="/api/auth/signout" method="post" className="mt-2">
+                <button type="submit" className="font-tech text-[11px] uppercase tracking-[0.14em] text-muted hover:text-fg border border-border rounded px-2.5 py-1.5">Sign out</button>
+              </form>
+            </>
+          ) : adminTokenAccess ? (
+            <div className="text-[11px] text-amber-300">Admin token access (infrastructure)</div>
+          ) : null}
+        </div>
       </div>
     </aside>
   );

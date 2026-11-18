@@ -4,6 +4,8 @@ import { getCurrentPipelineState } from "@/lib/pipeline";
 import { readVerificationRecords, summarizeOutcome } from "@/lib/verification/store";
 import { readStories } from "@/lib/stories/store";
 import { readRuns } from "@/lib/agent/runs";
+import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
+import { scopeForPrincipal } from "@/lib/auth/scope";
 import { getObservationStatus } from "@/lib/github/observe";
 import { readObservedEvents } from "@/lib/github/store";
 import { RunPipelineButton } from "./run-button";
@@ -23,12 +25,18 @@ function stageStatusColor(status: string) {
 }
 
 export default async function CommandCenterPage() {
+  const principal = await getServerPrincipal();
+  const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
   const projectId = await resolveProjectId();
   const pipeline = await getCurrentPipelineState();
   const [verifications, stories, runs, obsStatus, observedEvents] = await Promise.all([
-    readVerificationRecords({ projectId, includeLegacy: true }),
-    readStories(),
-    readRuns(),
+    readVerificationRecords({
+      projectId,
+      includeLegacy: !!scope.includeLegacy,
+      requestedBy: scope.privileged ? undefined : principal.userId,
+    }),
+    readStories(scope),
+    readRuns(scope),
     getObservationStatus(),
     readObservedEvents(),
   ]);

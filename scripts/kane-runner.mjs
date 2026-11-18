@@ -7,10 +7,28 @@
  */
 import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { statSync as fsSyncStatSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import {
+  buildIsolationPlan,
+  buildSandboxSpawnCommand,
+  assessIsolation,
+  normalizeIsolationMode,
+  probeIsolation,
+  requiresIsolationForJob,
+} from "./runner-isolation.mjs";
+import { workspaceDir, profileDir, isInside } from "./runner-workspace.mjs";
+import {
+  buildChildEnv,
+  validateJobForExecution,
+  isShellSafeArg,
+} from "./runner-security.mjs";
+
+const require = createRequire(import.meta.url);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -78,6 +96,52 @@ async function readJson(file, fallback) {
   }
 }
 
+/**
+ * Operator opt-in list of additional environment variable names passed to job processes.
+ * Secrets are filtered out regardless, so this cannot leak tokens.
+ */
+function extraChildEnvNames() {
+  const raw = required("KAGURA_KANE_CHILD_ENV_EXTRA");
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Locate the kane-cli Node entry point so the runner never has to go through cmd.exe.
+ * Resolution order: explicit override, local node_modules resolution, npm global root,
+ * node install root. Returns an absolute path or undefined.
+ */
+function resolveKaneCliEntry() {
+  const override = required("KAGURA_KANE_CLI_JS");
+  const candidates = [];
+  if (override) candidates.push(path.resolve(ROOT, override));
+  try {
+    candidates.push(require.resolve("@testmuai/kane-cli/bin/kane-cli.cjs"));
+  } catch {
+    // not installed locally
+  }
+  const rel = path.join("node_modules", "@testmuai", "kane-cli", "bin", "kane-cli.cjs");
+  if (process.env.APPDATA) candidates.push(path.join(process.env.APPDATA, "npm", rel));
+  if (process.env.ProgramFiles) candidates.push(path.join(process.env.ProgramFiles, "nodejs", rel));
+  candidates.push(path.join(path.dirname(process.execPath), rel));
+  candidates.push(path.join(path.dirname(process.execPath), "node_modules", "npm", rel));
+  for (const c of candidates) {
+    if (c && path.isAbsolute(c) && fsSyncExists(c)) return path.resolve(c);
+  }
+  return undefined;
+}
+
+function fsSyncExists(p) {
+  try {
+    return fsSyncStatSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
 async function writeJsonAtomic(file, data) {
   await ensureDir(path.dirname(file));
   const tmp = `${file}.${process.pid}.${Date.now()}.tmp`;
@@ -116,6 +180,26 @@ function getConfig() {
     heartbeatMs: Number.isFinite(heartbeatMs) && heartbeatMs >= 10000 ? heartbeatMs : 30000,
     maxBackoffMs: Number.isFinite(maxBackoffMs) && maxBackoffMs >= 5000 ? maxBackoffMs : 60000,
   };
+}
+
+function getIsolationConfig() {
+  const mode = normalizeIsolationMode(process.env.KAGURA_RUNNER_ISOLATION || "auto");
+  return {
+    mode,
+    sandboxUser: required("KAGURA_RUNNER_SANDBOX_USER") || undefined,
+    sandboxPassword: process.env.KAGURA_RUNNER_SANDBOX_PASSWORD || "",
+    workspacesRoot: path.join(ROOT, "data", "verification", "workspaces"),
+    profilesRoot: path.join(ROOT, "data", "verification", "profiles"),
+    repoRoot: ROOT,
+    isolateAllJobs: process.env.KAGURA_RUNNER_ISOLATE_ALL_JOBS === "true",
+  };
+}
+
+let isolationAssessment = null;
+async function assessIsolationOnce(config) {
+  if (isolationAssessment) return isolationAssessment;
+  isolationAssessment = assessIsolation(config, await probeIsolation(config));
+  return isolationAssessment;
 }
 
 async function apiRequest(cfg, method, pathname, body, timeoutMs = 30000) {
@@ -224,34 +308,82 @@ function mapOutcome(exitCode, runEndStatus) {
 }
 
 async function executeKaneJob(job, runnerId, onHeartbeat) {
-  const objective = String(job.objective || "").trim();
-  const url = String(job.url || "").trim();
-  if (!objective || !url) {
+  const startedAt = new Date().toISOString();
+
+  function reject(summary) {
     return {
-      jobId: job.id,
+      jobId: job?.id,
       runnerId,
       claimedBy: runnerId,
       outcome: "did_not_start",
       exitCode: 2,
-      summary: "Job missing required objective or url; cannot execute genuine Kane verification.",
-      startedAt: new Date().toISOString(),
+      summary,
+      startedAt,
       finishedAt: new Date().toISOString(),
     };
   }
 
-  const outDir = path.join(ROOT, "data", "verification", "runs");
-  await ensureDir(outDir);
-  const runId = randomUUID();
-  const ndjsonPath = path.join(outDir, `${runId}.ndjson`);
-  const startedAt = new Date().toISOString();
+  // 1) Validate every user-controlled field BEFORE any path is derived or process spawned.
+  const validated = validateJobForExecution(job);
+  if (!validated.ok) return reject(`Job rejected by runner validation: ${validated.reason}`);
+  const { objective, url, flow, timeout: timeoutSec, headless } = validated;
 
-  const profile = path.resolve(ROOT, "data", "verification", "kane-chrome-profile");
+  // 2) OS-level isolation gate. Ordinary-user jobs (recorded requestedBy) may only
+  // execute under a genuine OS boundary; platform/legacy jobs (no requestedBy) run
+  // under the shared runner account exactly as before.
+  const isolation = getIsolationConfig();
+  const requiresIsolation = requiresIsolationForJob(job, { isolateAllJobs: isolation.isolateAllJobs });
+  if (requiresIsolation) {
+    const assessment = await assessIsolationOnce(isolation);
+    if (!assessment.ok) {
+      log(`Isolation not ready: ${assessment.reason}`);
+      return reject(
+        `Refusing to execute ordinary-user job: OS-level isolation is unavailable (${assessment.reason}). ` +
+          "Run scripts/setup-runner-isolation.ps1 and set KAGURA_RUNNER_SANDBOX_USER / KAGURA_RUNNER_SANDBOX_PASSWORD.",
+      );
+    }
+    log(`OS-level isolation active as "${assessment.sandboxUser}" for job ${job.id}`);
+  }
+
+  // 2) Per-job isolation: a dedicated working directory and Kane/Chrome profile so that
+  // concurrent jobs from different users never share files, credentials, git state,
+  // or browser session data. The runner process itself is shared infrastructure; the
+  // per-job data is not. NOTE: this is a filesystem convention, NOT an OS security boundary.
+  const jobCwd = workspaceDir(ROOT, job);
+  const workspacesRoot = path.join(ROOT, "data", "verification", "workspaces");
+  if (!isInside(workspacesRoot, jobCwd) || path.resolve(jobCwd) === path.resolve(ROOT)) {
+    return reject("Refusing to execute: could not derive a safe isolated workspace for this job.");
+  }
+  await ensureDir(jobCwd);
+
+  // job.chromeProfile is never populated from user input today; if an operator pins one it
+  // must stay inside the profiles root, otherwise fall back to the per-job profile.
+  let profile = profileDir(ROOT, job);
+  if (typeof job.chromeProfile === "string" && job.chromeProfile.trim()) {
+    const configured = path.resolve(ROOT, job.chromeProfile.trim());
+    const profilesRoot = path.join(ROOT, "data", "verification", "profiles");
+    if (isInside(profilesRoot, configured)) profile = configured;
+  }
+  const profilesRoot = path.join(ROOT, "data", "verification", "profiles");
+  if (!isInside(profilesRoot, profile)) {
+    await fs.rm(jobCwd, { recursive: true, force: true }).catch(() => {});
+    return reject("Refusing to execute: could not derive a safe isolated Kane profile directory.");
+  }
   await ensureDir(profile);
 
-  const timeoutSec = typeof job.timeout === "number" && job.timeout > 0 ? Math.floor(job.timeout) : 180;
-  const headless = job.headless !== false;
-  const name = `kagura-${String(job.flow || "job").replace(/[^a-zA-Z0-9_-]/g, "-")}`;
+  // 3) Logs live inside the job's own workspace so one job's output is co-located with
+  // its data and never written into a shared directory.
+  const logsDir = path.join(jobCwd, "logs");
+  await ensureDir(logsDir);
+  const runId = randomUUID();
+  const ndjsonPath = path.join(logsDir, `${runId}.ndjson`);
+  if (!isInside(jobCwd, ndjsonPath)) {
+    return reject("Refusing to execute: could not derive a safe log path for this job.");
+  }
 
+  const name = `kagura-${flow}`;
+
+  // Approved, fixed argument set only. No user value is ever used as a command name.
   const args = ["run", objective, "--agent", "--url", url];
   if (headless) args.push("--headless");
   args.push("--timeout", String(timeoutSec));
@@ -259,17 +391,79 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
   args.push("--chrome-profile", profile);
 
   const userAgent = required("KANE_CLI_USER_AGENT") || "kilocode";
-  const env = { ...process.env, KANE_CLI_USER_AGENT: userAgent };
+  // Job processes get a minimal environment. Runner tokens, GitHub tokens, DATABASE_URL,
+  // NODE_OPTIONS and every other platform secret are never inherited.
+  const env = buildChildEnv(process.env, {
+    overrides: { KANE_CLI_USER_AGENT: userAgent },
+    extraNames: extraChildEnvNames(),
+  });
 
-  const isWin = process.platform === "win32";
-  const child = isWin
-    ? spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "kane-cli", ...args], {
-        env,
-        cwd: ROOT,
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      })
-    : spawn("kane-cli", args, { shell: false, env, cwd: ROOT, stdio: ["ignore", "pipe", "pipe"] });
+  // 4) Spawn without a shell. On Windows `kane-cli` is an npm .cmd shim, and routing it
+  // through cmd.exe would let cmd metacharacters in job input execute arbitrary commands.
+  // Instead we invoke the underlying Node entry point directly with node.exe. When OS-level
+  // isolation is active the process is launched as the restricted sandbox account via
+  // PowerShell (arguments passed as data, never interpolated into a command string), with
+  // stdout/stderr redirected to files inside the job workspace.
+  let spawnTarget;
+  let spawnArgs;
+  let sandboxed = false;
+  let sandboxOutFile = "";
+  let sandboxErrFile = "";
+  if (process.platform === "win32") {
+    const entry = resolveKaneCliEntry();
+    if (!entry) {
+      return reject(
+        "Runner misconfigured: could not locate the kane-cli Node entry point. " +
+          "Set KAGURA_KANE_CLI_JS to the absolute path of kane-cli.cjs (the npm .cmd shim is never used).",
+      );
+    }
+    const assessment = isolation.mode === "account" ? isolationAssessment : null;
+    if (requiresIsolation && assessment?.ok) {
+      sandboxed = true;
+      sandboxOutFile = path.join(jobCwd, "logs", `stdout-${runId}.txt`);
+      sandboxErrFile = path.join(jobCwd, "logs", `stderr-${runId}.txt`);
+      // The sandbox password is never embedded in the command line. It is written to
+      // a per-job file inside the workspace and ACL-locked so only the sandbox account
+      // (and SYSTEM/Administrators) can read it; PowerShell reads it at spawn time.
+      const pwFile = path.join(jobCwd, "logs", `.sandbox-pw-${runId}.txt`);
+      await fs.writeFile(pwFile, isolation.sandboxPassword, "utf8").catch(() => {});
+      try {
+        await spawn(
+          "icacls",
+          [pwFile, "/grant", `${assessment.sandboxUser}:(R)`, "/inheritance:r"],
+          { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
+        ).catch(() => {});
+      } catch {}
+      spawnTarget = "powershell.exe";
+      spawnArgs = buildSandboxSpawnCommand({
+        nodeExe: process.execPath,
+        cliEntry: entry,
+        args,
+        cwd: jobCwd,
+        stdoutFile: sandboxOutFile,
+        stderrFile: sandboxErrFile,
+        sandboxUser: assessment.sandboxUser,
+        passwordFile: pwFile,
+      });
+    } else {
+      spawnTarget = process.execPath;
+      spawnArgs = [entry, ...args];
+    }
+  } else {
+    const bin = required("KAGURA_KANE_CLI_BIN") || "kane-cli";
+    if (!isShellSafeArg(bin)) return reject("Runner misconfigured: unsafe KAGURA_KANE_CLI_BIN value.");
+    spawnTarget = bin;
+    spawnArgs = args;
+  }
+
+  const child = spawn(spawnTarget, spawnArgs, {
+    env: sandboxed ? {} : env,
+    cwd: sandboxed ? jobCwd : jobCwd,
+    shell: false,
+    windowsVerbatimArguments: false,
+    windowsHide: true,
+    stdio: sandboxed ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
+  });
 
   let stdout = "";
   let stderr = "";
@@ -302,8 +496,20 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
     });
   });
 
-  await fs.writeFile(ndjsonPath, closeResult.stdout || stdout || "", "utf8").catch(() => {});
-  const { runEnd, failingStep } = parseNdjson(closeResult.stdout || stdout || "");
+  // When sandboxed, Kane's stdout/stderr were redirected to files inside the job
+  // workspace; read them back so NDJSON parsing and evidence work unchanged. The
+  // per-job password file is deleted immediately after the process exits.
+  let finalStdout = stdout;
+  let finalStderr = stderr;
+  if (sandboxed) {
+    try { finalStdout = await fs.readFile(sandboxOutFile, "utf8"); } catch {}
+    try { finalStderr = await fs.readFile(sandboxErrFile, "utf8"); } catch {}
+    const pwFile = path.join(jobCwd, "logs", `.sandbox-pw-${runId}.txt`);
+    await fs.rm(pwFile, { force: true }).catch(() => {});
+  }
+
+  await fs.writeFile(ndjsonPath, closeResult.stdout || finalStdout || "", "utf8").catch(() => {});
+  const { runEnd, failingStep } = parseNdjson(closeResult.stdout || finalStdout || "");
   const runEndStatus = typeof runEnd?.status === "string" ? runEnd.status : undefined;
   const outcome = closeResult.outcome || mapOutcome(closeResult.exitCode ?? null, runEndStatus);
   const durationRaw = runEnd?.duration;
@@ -313,7 +519,7 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
       : typeof durationRaw === "string" && !Number.isNaN(Number(durationRaw))
         ? Math.round(Number(durationRaw) * 1000)
         : undefined;
-  const evidenceMatch = String(closeResult.stderr || stderr || "").match(/(\S+\.evidence\b)/i);
+  const evidenceMatch = String(closeResult.stderr || finalStderr || "").match(/(\S+\.evidence\b)/i);
 
   return {
     jobId: job.id,
@@ -335,17 +541,54 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
     testUrl: typeof runEnd?.test_url === "string" ? runEnd.test_url : undefined,
     sessionDir: typeof runEnd?.session_dir === "string" ? runEnd.session_dir : undefined,
     ndjsonPath,
+    workspaceDir: path.relative(ROOT, jobCwd).replace(/\\/g, "/"),
     runEnd,
-    stderr: (closeResult.stderr || stderr || undefined) ? String(closeResult.stderr || stderr) : undefined,
-    command: `KANE_CLI_USER_AGENT=${userAgent} kane-cli run --agent --url <target>`,
+    stderr: (closeResult.stderr || finalStderr || undefined) ? String(closeResult.stderr || finalStderr) : undefined,
+    command: `${JSON.stringify(spawnTarget)} ${spawnArgs.map((a) => JSON.stringify(a)).join(" ")} (shell: false, cwd: ${path.relative(ROOT, jobCwd).replace(/\\/g, "/") || "."})`,
     startedAt,
     finishedAt: new Date().toISOString(),
   };
 }
 
+/**
+ * Best-effort removal of stale per-job workspaces. Disabled by default
+ * (KAGURA_RUNNER_WORKSPACE_RETENTION_DAYS=0) so evidence is never silently destroyed.
+ * When enabled, only directories under the workspaces root older than the retention
+ * window are removed — never the current job's workspace, and never arbitrary paths.
+ */
+async function pruneStaleWorkspaces(retentionDays) {
+  if (!Number.isFinite(retentionDays) || retentionDays <= 0) return { removed: 0 };
+  const workspacesRoot = path.join(ROOT, "data", "verification", "workspaces");
+  const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  let removed = 0;
+  let entries = [];
+  try {
+    entries = await fs.readdir(workspacesRoot, { withFileTypes: true });
+  } catch {
+    return { removed: 0 };
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const full = path.join(workspacesRoot, entry.name);
+    if (!isInside(workspacesRoot, full)) continue;
+    try {
+      const stat = await fs.stat(full);
+      if (stat.mtimeMs < cutoff) {
+        await fs.rm(full, { recursive: true, force: true });
+        removed++;
+      }
+    } catch {
+      // ignore individual failures
+    }
+  }
+  return { removed };
+}
+
 async function main() {
   await loadEnv();
   const cfg = getConfig();
+  const isolation = getIsolationConfig();
+  log(`Runner isolation: mode=${isolation.mode} sandboxUser=${isolation.sandboxUser || "(none)"}`);
   if (!cfg.base) {
     console.error("KAGURA_RUNNER_TOKEN/KAGURA_APP_URL configuration error: KAGURA_APP_URL is required.");
     process.exit(2);
@@ -423,6 +666,15 @@ async function main() {
     const flushed = await flushSyncQueue(cfg, runnerId);
     if (flushed.flushed > 0) log(`KAGURA RUNNER: flushed ${flushed.flushed} pending sync payload(s)`);
   } catch {}
+
+  // Optional stale per-job workspace pruning (disabled unless retention is configured).
+  const retentionDays = Number(process.env.KAGURA_RUNNER_WORKSPACE_RETENTION_DAYS || 0);
+  if (retentionDays > 0) {
+    try {
+      const pruned = await pruneStaleWorkspaces(retentionDays);
+      if (pruned.removed > 0) log(`KAGURA RUNNER: pruned ${pruned.removed} stale job workspace(s)`);
+    } catch {}
+  }
 
   let idleHeartbeatAt = 0;
   while (!stopping) {

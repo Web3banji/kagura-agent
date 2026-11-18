@@ -4,12 +4,20 @@ import { readVerificationRecords, summarizeOutcome } from "@/lib/verification/st
 import { RerunVerificationButton } from "./rerun-button";
 import { statusInfo } from "@/lib/ui-text";
 import { resolveProjectId } from "@/lib/verification/context";
+import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
+import { scopeForPrincipal } from "@/lib/auth/scope";
 
 export const dynamic = "force-dynamic";
 
 export default async function VerificationLabPage() {
+  const principal = await getServerPrincipal();
+  const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
   const projectId = await resolveProjectId();
-  const records = await readVerificationRecords({ projectId, includeLegacy: true });
+  const records = await readVerificationRecords({
+    projectId,
+    includeLegacy: !!scope.includeLegacy,
+    requestedBy: scope.privileged ? undefined : principal.userId,
+  });
   const summary = summarizeOutcome(records);
   const latestInfo = statusInfo(summary.latest);
 

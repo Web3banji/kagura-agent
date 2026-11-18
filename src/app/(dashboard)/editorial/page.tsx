@@ -1,5 +1,7 @@
 import { PageHeader, Panel, EmptyState } from "@/components/ui/Primitives";
 import { readStories } from "@/lib/stories/store";
+import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
+import { scopeForPrincipal } from "@/lib/auth/scope";
 import { aiConfigured } from "@/lib/ai/provider";
 import Link from "next/link";
 import { DraftActions } from "./draft-actions";
@@ -7,7 +9,9 @@ import { DraftActions } from "./draft-actions";
 export const dynamic = "force-dynamic";
 
 export default async function EditorialPage() {
-  const stories = await readStories();
+  const principal = await getServerPrincipal();
+  const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
+  const stories = await readStories(scope);
   const drafts = stories.filter((s) => s.status === "review" || s.status === "draft");
   const rejected = stories.filter((s) => s.status === "rejected");
   const published = stories.filter((s) => s.status === "published");

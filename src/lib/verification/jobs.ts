@@ -2,7 +2,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
 import type { RunnerHeartbeat, VerificationJob, VerificationJobStatus, VerificationOutcome } from "@/types/verification";
-import { ensureDb, getPool, hasDatabase, kvGet, kvSet } from "@/lib/db";
+import { ensureDb, getPool, hasDatabase, isProductionRuntime, kvGet, kvSet } from "@/lib/db";
 
 const DATA_DIR = path.join(process.cwd(), "data", "verification");
 const JOBS_FILE = path.join(DATA_DIR, "jobs.json");
@@ -14,7 +14,14 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function canUseLocalFs(): boolean {
+  return !hasDatabase() && !isProductionRuntime();
+}
+
 async function ensureFile() {
+  if (!canUseLocalFs()) {
+    throw new Error("Durable verification job storage is not configured (DATABASE_URL missing in production).");
+  }
   await fs.mkdir(DATA_DIR, { recursive: true });
   try {
     await fs.access(JOBS_FILE);
@@ -24,6 +31,7 @@ async function ensureFile() {
 }
 
 async function readJobsFile(): Promise<VerificationJob[]> {
+  if (!canUseLocalFs()) return [];
   await ensureFile();
   try {
     const raw = await fs.readFile(JOBS_FILE, "utf8");
@@ -35,6 +43,9 @@ async function readJobsFile(): Promise<VerificationJob[]> {
 }
 
 async function writeJobsFile(jobs: VerificationJob[]): Promise<void> {
+  if (!canUseLocalFs()) {
+    throw new Error("Durable verification job storage is not configured (DATABASE_URL missing in production).");
+  }
   await ensureFile();
   await fs.writeFile(JOBS_FILE, JSON.stringify(jobs.slice(0, 200), null, 2), "utf8");
 }
@@ -133,7 +144,7 @@ export async function enqueueJob(job: Omit<VerificationJob, "id" | "status" | "c
   return record;
 }
 
-export async function readJobs(opts?: { projectId?: string; requestedBy?: string }): Promise<VerificationJob[]> {
+export async function readJobs(opts?: { projectId?: string; requestedBy?: string; includeLegacy?: boolean }): Promise<VerificationJob[]> {
   let jobs: VerificationJob[];
   if (hasDatabase()) {
     await ensureDb();
@@ -142,21 +153,35 @@ export async function readJobs(opts?: { projectId?: string; requestedBy?: string
   } else {
     jobs = await readJobsFile();
   }
-  return jobs.filter((j) => {
-    if (opts?.projectId && j.projectId && j.projectId !== opts.projectId) return false;
-    if (opts?.requestedBy && j.requestedBy && j.requestedBy !== opts.requestedBy) return false;
-    return true;
-  });
+  return jobs.filter((j) => matchesJobScope(j, opts));
 }
 
-export async function getJob(id: string, opts?: { projectId?: string; requestedBy?: string }): Promise<VerificationJob | undefined> {
+/**
+ * Fails closed. When `requestedBy` is supplied, jobs owned by a different principal
+ * are excluded, and jobs with no recorded owner (legacy/platform jobs) are excluded
+ * unless `includeLegacy` is explicitly true. The same rule applies to `projectId`.
+ */
+function matchesJobScope(
+  job: VerificationJob,
+  opts?: { projectId?: string; requestedBy?: string; includeLegacy?: boolean },
+): boolean {
+  if (opts?.projectId) {
+    if (job.projectId && job.projectId !== opts.projectId) return false;
+    if (!job.projectId && !opts.includeLegacy) return false;
+  }
+  if (opts?.requestedBy) {
+    if (job.requestedBy && job.requestedBy !== opts.requestedBy) return false;
+    if (!job.requestedBy && !opts.includeLegacy) return false;
+  }
+  return true;
+}
+
+export async function getJob(id: string, opts?: { projectId?: string; requestedBy?: string; includeLegacy?: boolean }): Promise<VerificationJob | undefined> {
   let job: VerificationJob | undefined;
   if (hasDatabase()) job = await getDbJob(id);
   else job = (await readJobsFile()).find((j) => j.id === id);
   if (!job) return undefined;
-  if (opts?.projectId && job.projectId && job.projectId !== opts.projectId) return undefined;
-  if (opts?.requestedBy && job.requestedBy && job.requestedBy !== opts.requestedBy) return undefined;
-  return job;
+  return matchesJobScope(job, opts) ? job : undefined;
 }
 
 export async function updateJob(id: string, patch: Partial<VerificationJob>): Promise<VerificationJob | undefined> {

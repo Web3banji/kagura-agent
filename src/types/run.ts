@@ -18,6 +18,12 @@ export interface AgentRun {
   currentStage: AgentStage;
   stages: StageRecord[];
   trigger: "manual" | "observe";
+  /**
+   * Authenticated principal that initiated this run (when available).
+   * Legacy/pre-auth runs have this unset; access is still gated by the existing
+   * workspace/legacy-data authorization checks in the API routes.
+   */
+  userId?: string | null;
   observation?: { repo: string; source: string; newCount: number; totalFetched: number };
   verificationId?: string;
   verificationOutcome?: string;

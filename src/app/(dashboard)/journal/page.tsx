@@ -6,6 +6,8 @@ import { verificationToJournal } from "@/lib/journal/activity";
 import { readObservedEvents } from "@/lib/github/store";
 import { getObservationStatus } from "@/lib/github/observe";
 import { resolveProjectId } from "@/lib/verification/context";
+import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
+import { scopeForPrincipal } from "@/lib/auth/scope";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -19,10 +21,16 @@ function eventKindLabel(type: string) {
 }
 
 export default async function JournalPage() {
+  const principal = await getServerPrincipal();
+  const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
   const projectId = await resolveProjectId();
   const [stored, verifications, observed, obsStatus] = await Promise.all([
     readJournalEvents(),
-    readVerificationRecords({ projectId, includeLegacy: true }),
+    readVerificationRecords({
+      projectId,
+      includeLegacy: !!scope.includeLegacy,
+      requestedBy: scope.privileged ? undefined : principal.userId,
+    }),
     readObservedEvents(),
     getObservationStatus(),
   ]);
