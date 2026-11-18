@@ -32,7 +32,7 @@ export async function POST(req: Request) {
     const draft = await generateDraft(
       {
         repo: story.source.repo,
-        source: story.source.observationSource || "git-local",
+        source: story.source.observationSource || "none",
         commits: story.source.commits.map((c) => ({ sha: c.sha, message: c.message, date: c.date, author: c.author, url: c.url })),
         changedFiles: story.source.changedFiles || [],
         summary: story.source.observationSummary,

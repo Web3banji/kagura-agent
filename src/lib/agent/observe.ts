@@ -7,7 +7,7 @@ const execFileAsync = promisify(execFile);
 
 export interface Observation {
   repo: string;
-  source: "github-api" | "git-local";
+  source: "github-api" | "git-local" | "none";
   commits: CommitInfo[];
   changedFiles: string[];
   summary: string;

@@ -120,7 +120,15 @@ async function callAnthropic(prompt: string, model: string): Promise<string> {
 function templateArticle(input: GenerateArticleInput): GeneratedArticle {
   const top = input.commits[0];
   const title = input.titleHint || (top ? `Development update: ${top.message}` : "Development update");
-  const subtitle = input.subtitleHint || `Evidence-grounded report from ${input.observationSource} and ${input.verification ? "a real Kane CLI verification run" : "recorded analysis"}.`;
+  const observationSourceLabel =
+    input.observationSource === "github-api"
+      ? "GitHub API"
+      : input.observationSource === "git-local"
+        ? "local git"
+        : input.observationSource === "none"
+          ? "no verified observation source"
+          : input.observationSource;
+  const subtitle = input.subtitleHint || `Evidence-grounded report from ${observationSourceLabel} and ${input.verification ? "a real Kane CLI verification run" : "recorded analysis"}.`;
   const commitLines = input.commits.slice(0, 8).map((c) => `- \`${c.sha.slice(0, 7)}\` ${c.message} (${c.date || "n/a"}${c.author ? `, ${c.author}` : ""})`).join("\n") || "- No commits observed.";
   const files = input.changedFiles.slice(0, 20).map((f) => `- ${f}`).join("\n");
   const v = input.verification;

@@ -26,7 +26,7 @@ export interface Story {
     commits: StoryCommit[];
     changedFiles?: string[];
     observationSummary: string;
-    observationSource?: "github-api" | "git-local";
+    observationSource?: "github-api" | "git-local" | "none";
   };
   verification?: {
     id: string;

@@ -35,7 +35,7 @@ export interface ObservationState {
 
 export interface GitHubObservationResult {
   repo: string;
-  source: "github-api" | "git-local";
+  source: "github-api" | "git-local" | "none";
   commits: ObservedCommit[];
   newCommits: ObservedCommit[];
   state: ObservationState;

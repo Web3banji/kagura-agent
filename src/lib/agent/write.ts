@@ -9,7 +9,7 @@ function slugify(s: string) {
 
 export interface DraftObservation {
   repo?: string;
-  source: "github-api" | "git-local";
+  source: "github-api" | "git-local" | "none";
   commits: Array<{ sha: string; shortSha?: string; message: string; date?: string; author?: string; url?: string }>;
   changedFiles: string[];
   summary: string;
@@ -40,7 +40,13 @@ export async function generateDraft(
   const changedFiles = observation.changedFiles.slice(0, 40);
   const top = observation.commits[0];
   const titleHint = top ? `Development update: ${top.message}` : "Development update: repository observed";
-  const subtitleHint = `Evidence-grounded report from ${observation.source === "github-api" ? "GitHub API" : "local git"} observation${verification ? ` and a real Kane CLI verification run (${verification.outcome})` : ""}.`;
+  const observationSourceLabel =
+    observation.source === "github-api"
+      ? "GitHub API"
+      : observation.source === "git-local"
+        ? "local git"
+        : "unavailable observation source";
+  const subtitleHint = `Evidence-grounded report from ${observationSourceLabel} observation${verification ? ` and a real Kane CLI verification run (${verification.outcome})` : ""}.`;
 
   const article = await generateArticle({
     titleHint,
