@@ -2,23 +2,87 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Design tokens ──
+   Light mode is the default. Dark mode is applied via the `.dark` class on <html>.
+   Existing custom token names are preserved so current components keep working;
+   their values are redefined for the new KAGURA palette. Semantic aliases
+   (--ink, --surface, --line, --accent-soft, ...) are added for the new UI. */
+
 :root {
+  /* Brand */
+  --brand-orange: #E96B38;
+  --brand-orange-soft: rgba(233, 107, 56, 0.12);
+  --brand-orange-strong: #d15a28;
+
+  /* Neutral (light mode default) */
+  --bg: #F5F6F8;
+  --bg-elevated: #FFFFFF;
+  --panel: rgba(255, 255, 255, 0.6);
+  --panel-2: rgba(245, 246, 248, 0.9);
+  --panel-solid: #FFFFFF;
+  --fg: #20232B;
+  --fg-soft: #4B5563;
+  --muted: #6B7280;
+  --muted-soft: #9CA3AF;
+
+  /* Borders & lines */
+  --border: rgba(32, 35, 43, 0.10);
+  --border-strong: rgba(32, 35, 43, 0.18);
+  --border-inset: rgba(32, 35, 43, 0.06);
+
+  /* Status */
+  --accent: #E96B38;
+  --accent-soft: rgba(233, 107, 56, 0.10);
+  --accent-2: #d15a28;
+  --success: #239B59;
+  --success-soft: rgba(35, 155, 89, 0.10);
+  --danger: #D94848;
+  --danger-soft: rgba(217, 72, 72, 0.10);
+  --warning: #D99018;
+  --warning-soft: rgba(217, 144, 24, 0.10);
+  --info: #3478C7;
+  --info-soft: rgba(52, 120, 199, 0.10);
+  --ai: #7957C8;
+  --ai-soft: rgba(121, 87, 200, 0.10);
+
+  /* Misc */
+  --grid: rgba(233, 107, 56, 0.03);
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.06), 0 2px 4px -2px rgb(0 0 0 / 0.04);
+  --radius: 0.75rem;
+  --radius-sm: 0.5rem;
+}
+
+/* ── Dark mode ── */
+.dark {
   --bg: #040303;
   --bg-elevated: #0b0908;
-  --panel: rgba(14, 11, 10, 0.9);
-  --panel-2: rgba(20, 14, 12, 0.94);
+  --panel: rgba(14, 11, 10, 0.85);
+  --panel-2: rgba(20, 14, 12, 0.9);
   --panel-solid: #0e0b0a;
-  --border: rgba(240, 230, 220, 0.1);
-  --border-strong: rgba(240, 230, 220, 0.18);
   --fg: #f6f1eb;
+  --fg-soft: #c7bfb4;
   --muted: #a79b92;
-  --accent: #e04000;
-  --accent-2: #ff7a2f;
-  --accent-soft: rgba(224, 64, 0, 0.14);
+  --muted-soft: #8a7d72;
+  --border: rgba(240, 230, 220, 0.10);
+  --border-strong: rgba(240, 230, 220, 0.18);
+  --border-inset: rgba(240, 230, 220, 0.06);
+  --accent: #ff7a2f;
+  --accent-soft: rgba(255, 122, 47, 0.14);
+  --accent-2: #e04000;
   --success: #34d399;
+  --success-soft: rgba(52, 211, 153, 0.14);
   --danger: #ff4d4d;
+  --danger-soft: rgba(255, 77, 77, 0.14);
   --warning: #f59e0b;
-  --grid: rgba(224, 64, 0, 0.035);
+  --warning-soft: rgba(245, 158, 11, 0.14);
+  --info: #60a5fa;
+  --info-soft: rgba(96, 165, 250, 0.14);
+  --ai: #a78bfa;
+  --ai-soft: rgba(167, 139, 250, 0.14);
+  --grid: rgba(255, 122, 47, 0.035);
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+  --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.5), 0 2px 4px -2px rgb(0 0 0 / 0.4);
 }
 
 * {
@@ -34,24 +98,25 @@ body {
   color: var(--fg);
   background-color: var(--bg);
   background-image:
-    linear-gradient(to bottom, rgba(224, 64, 0, 0.07), transparent 24%),
-    radial-gradient(900px 420px at 100% -10%, rgba(255, 122, 47, 0.1), transparent 52%),
-    radial-gradient(700px 360px at 0% 0%, rgba(224, 64, 0, 0.06), transparent 45%),
+    linear-gradient(to bottom, rgba(233, 107, 56, 0.04), transparent 24%),
+    radial-gradient(900px 420px at 100% -10%, rgba(233, 107, 56, 0.08), transparent 52%),
     linear-gradient(var(--grid) 1px, transparent 1px),
     linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-  background-size: auto, auto, auto, 48px 48px, 48px 48px;
-  background-position: center top, center top, center top, center center, center center;
+  background-size: auto, auto, 48px 48px, 48px 48px;
+  background-position: center top, center top, center center, center center;
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
 }
 
 ::selection {
-  background: rgba(224, 64, 0, 0.35);
+  background: rgba(233, 107, 56, 0.35);
   color: var(--fg);
 }
 
 @layer components {
   .k-surface {
-    @apply rounded-xl border bg-panel/80 backdrop-blur-sm shadow-soft;
+    @apply rounded-xl border backdrop-blur-sm shadow-sm;
+    border-color: var(--border);
+    background-color: var(--panel);
   }
   .k-label {
     font-family: var(--font-jetbrains-mono), var(--font-geist-mono), ui-monospace, monospace;

@@ -15,7 +15,7 @@ export default async function DashboardLayout({ children }: { children: React.Re
   }
 
   if (principal.kind === "admin-token") {
-    return <AppShell currentUser={null} adminTokenAccess>{children}</AppShell>;
+    return <AppShell currentUser={null}>{children}</AppShell>;
   }
 
   const user = await getCurrentUser();
