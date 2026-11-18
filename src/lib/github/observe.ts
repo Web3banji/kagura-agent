@@ -2,9 +2,32 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { readGitHubConfig, repoSlug, hasToken } from "./config";
 import { readObservationState, writeObservationState, mergeObservedCommits, readObservedEvents } from "./store";
+import { getUserGitHubAccessToken } from "@/lib/auth/users";
 import type { GitHubObservationResult, ObservedCommit, ObservedCommitFile } from "@/types/github";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Safe diagnostic context for observation. Never logs tokens, secrets, keys, or
+ * authorization headers — only the credential source, authenticated GitHub login
+ * (masked to first/last char), and the GitHub API response status.
+ */
+interface ObservationDiag {
+  credentialSource: "user-oauth" | "server-env" | "none";
+  actorLogin?: string;
+  apiStatus?: number;
+  error?: string;
+}
+
+function diag(entry: ObservationDiag) {
+  const masked = entry.actorLogin ? entry.actorLogin.replace(/^.(.*).$/, (s) => s[0] + "*".repeat(Math.max(0, s.length - 2)) + s.slice(-1)) : undefined;
+  console.log(
+    `[github-observe] source=${entry.credentialSource}` +
+      (masked ? ` actor=${masked}` : "") +
+      (entry.apiStatus !== undefined ? ` status=${entry.apiStatus}` : "") +
+      (entry.error ? ` error=${entry.error}` : ""),
+  );
+}
 
 function ghHeaders(token: string) {
   return {
@@ -51,22 +74,36 @@ async function fetchGitHubCommits(slug: string, token: string): Promise<Observed
     author?: { login?: string };
   }>;
   // fetch changed files for a reasonable number (recent) to stay lightweight
-  const commits: ObservedCommit[] = [];
-  for (let i = 0; i < data.length; i++) {
-    const c = data[i];
-    const files = i < 10 ? await fetchCommitFiles(slug, c.sha, token) : [];
-    commits.push({
-      sha: c.sha,
-      shortSha: c.sha.slice(0, 7),
-      message: c.commit.message.split("\n")[0],
-      author: c.author?.login || c.commit.author.name || "unknown",
-      authorEmail: c.commit.author.email,
-      date: c.commit.author.date,
-      url: c.html_url,
-      files,
+    const commits: ObservedCommit[] = [];
+    for (let i = 0; i < data.length; i++) {
+      const c = data[i];
+      const files = i < 10 ? await fetchCommitFiles(slug, c.sha, token) : [];
+      commits.push({
+        sha: c.sha,
+        shortSha: c.sha.slice(0, 7),
+        message: c.commit.message.split("\n")[0],
+        author: c.author?.login || c.commit.author.name || "unknown",
+        authorEmail: c.commit.author.email,
+        date: c.commit.author.date,
+        url: c.html_url,
+        files,
+      });
+    }
+    return commits;
+}
+
+async function fetchAuthenticatedUser(token: string): Promise<string | undefined> {
+  try {
+    const res = await fetch("https://api.github.com/user", {
+      headers: ghHeaders(token),
+      cache: "no-store",
     });
+    if (!res.ok) return undefined;
+    const data = (await res.json()) as { login?: string };
+    return data.login;
+  } catch {
+    return undefined;
   }
-  return commits;
 }
 
 async function localCommitsFallback(limit = 15): Promise<ObservedCommit[]> {
@@ -113,25 +150,53 @@ async function localCommitsFallback(limit = 15): Promise<ObservedCommit[]> {
   }
 }
 
-export async function observeGitHub(): Promise<GitHubObservationResult> {
+export async function observeGitHub({ actorUserId }: { actorUserId?: string } = {}): Promise<GitHubObservationResult> {
   const cfg = await readGitHubConfig();
   const slug = repoSlug(cfg);
-  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
   const state = await readObservationState();
   const observedAt = new Date().toISOString();
+
+  // Resolve the credential: the authenticated user's own GitHub OAuth token first,
+  // then the server-level GITHUB_TOKEN/GH_TOKEN as a fallback. This keeps
+  // observation resilient to a missing or expired server PAT while never exposing
+  // tokens in logs.
+  let token: string | undefined;
+  let credentialSource: "user-oauth" | "server-env" | "none" = "none";
+  if (actorUserId) {
+    token = (await getUserGitHubAccessToken(actorUserId)) ?? undefined;
+    if (token) credentialSource = "user-oauth";
+  }
+  if (!token) {
+    token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+    if (token) credentialSource = "server-env";
+  }
+
+  let actorLogin: string | undefined;
+  if (token) actorLogin = await fetchAuthenticatedUser(token);
+
+  const hasApiToken = !!token;
 
   try {
     let commits: ObservedCommit[] = [];
     let source: "github-api" | "git-local" = "git-local";
     let note: string | undefined;
 
-    if (token) {
-      commits = await fetchGitHubCommits(slug, token);
-      source = "github-api";
+    if (hasApiToken) {
+      try {
+        commits = await fetchGitHubCommits(slug, token!);
+        source = "github-api";
+        diag({ credentialSource, actorLogin, apiStatus: 200 });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const statusMatch = msg.match(/GitHub API (\d+):/);
+        diag({ credentialSource, actorLogin, apiStatus: statusMatch ? Number(statusMatch[1]) : undefined, error: msg });
+        throw err;
+      }
     } else {
       commits = await localCommitsFallback(15);
       source = "git-local";
-      note = "GITHUB_TOKEN not configured; fell back to local git history. Configure a token in .env.local for real GitHub API observation.";
+      note = "No GitHub token configured; fell back to local git history. Connect GitHub or set GITHUB_TOKEN/GH_TOKEN for real GitHub API observation.";
+      diag({ credentialSource: "none", actorLogin });
     }
 
     const { added } = await mergeObservedCommits(commits);
@@ -171,7 +236,7 @@ export async function observeGitHub(): Promise<GitHubObservationResult> {
       const pmsg = persistErr instanceof Error ? persistErr.message : String(persistErr);
       return {
         repo: slug,
-        source: hasToken() ? "github-api" : "git-local",
+        source: hasApiToken ? "github-api" : "git-local",
         commits: [],
         newCommits: [],
         state: { ...failedState, lastError: `${msg} (also failed to persist state: ${pmsg})` },
@@ -181,7 +246,7 @@ export async function observeGitHub(): Promise<GitHubObservationResult> {
     }
     return {
       repo: slug,
-      source: hasToken() ? "github-api" : "git-local",
+      source: hasApiToken ? "github-api" : "git-local",
       commits: [],
       newCommits: [],
       state: failedState,

@@ -2,7 +2,7 @@ import { randomUUID } from "crypto";
 import { ensureDb, getPool, hasDatabase } from "@/lib/db";
 import type { GitHubProfile } from "./oauth";
 import { assignBootstrapOwnerIfEligible } from "./guards";
-import { encryptStoredToken } from "./token-crypto";
+import { encryptStoredToken, decryptStoredToken } from "./token-crypto";
 
 export type DbUser = {
   id: string;
@@ -119,8 +119,28 @@ export async function upsertGitHubUser(
   }
 }
 
+/**
+ * Retrieve the authenticated user's decrypted GitHub OAuth access token, if they
+ * have connected GitHub via OAuth. Returns null when no token is stored. This is
+ * used so GitHub observation can fall back to the user's own credentials instead of
+ * relying solely on a server-level PAT that may be missing or expired.
+ */
+export async function getUserGitHubAccessToken(userId: string): Promise<string | null> {
+  if (!hasDatabase()) return null;
+  await ensureDb();
+  const pool = getPool();
+  const res = await pool.query(
+    `SELECT access_token FROM accounts WHERE user_id = $1 AND provider = 'github' AND access_token IS NOT NULL LIMIT 1`,
+    [userId],
+  );
+  if (!res.rows[0]) return null;
+  return decryptStoredToken(String(res.rows[0].access_token)) ?? null;
+}
+
+/**
+ * Create a bootstrap project for the bootstrap owner if none exists yet (safe, additive).
+ */
 export async function ensureBootstrapProjectForUser(userId: string): Promise<string | null> {
-  // Create a bootstrap project for the bootstrap owner if none exists yet (safe, additive).
   if (!hasDatabase()) return null;
   await ensureDb();
   const pool = getPool();

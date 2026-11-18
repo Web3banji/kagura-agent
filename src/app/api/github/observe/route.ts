@@ -14,7 +14,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "GitHub observation may only be triggered by a workspace owner." }, { status: 403 });
   }
   try {
-    const result = await observeGitHub();
+    const result = await observeGitHub({ actorUserId: principal.userId });
     if (result.error) {
       return NextResponse.json(result, { status: 502 });
     }
