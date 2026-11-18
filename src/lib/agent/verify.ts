@@ -1,48 +1,49 @@
-import { runKane } from "@/lib/kane/runner";
+import { enqueueJob } from "@/lib/verification/jobs";
 import { appendVerificationRecord } from "@/lib/verification/store";
+import { readGitHubConfig, repoSlug } from "@/lib/github/config";
 import type { VerificationRecord } from "@/types/verification";
 import type { Analysis } from "./analyse";
-import path from "path";
 
 export async function verifyWithKane(
   analysis: Analysis,
-  opts?: { source?: "local" | "runner"; jobId?: string },
+  opts?: { source?: "local" | "runner"; jobId?: string; projectId?: string; requestedBy?: string },
 ): Promise<VerificationRecord> {
-  const url = process.env.KAGURA_APP_URL || (process.env.KAGURA_APP_URL || process.env.KAGURA_APP_URL) || "http://localhost:3000";
-  const profile = path.resolve(process.cwd(), "data", "verification", "kane-chrome-profile");
+  const url = process.env.KAGURA_APP_URL || process.env.ECHOLOG_APP_URL || "http://localhost:3000";
+  let projectId = opts?.projectId;
+  if (!projectId) {
+    try {
+      const cfg = await readGitHubConfig();
+      projectId = repoSlug(cfg) || "default";
+    } catch {
+      projectId = "default";
+    }
+  }
   const startedAt = new Date().toISOString();
-  const result = await runKane({
+  const job = await enqueueJob({
+    id: opts?.jobId,
+    flow: analysis.flow,
     objective: analysis.objective,
     url,
+    projectId,
+    requestedBy: opts?.requestedBy,
     headless: true,
-    timeoutSeconds: 180,
-    name: `kagura-${analysis.flow}`,
-    chromeProfile: profile,
+    timeout: 180,
+    reason: "pipeline",
   });
 
   const record: VerificationRecord = {
-    id: result.id || crypto.randomUUID(),
+    id: job.id,
     flow: analysis.flow,
     objective: analysis.objective,
-    command: result.command,
     url,
-    chromeProfile: profile,
-    outcome: result.outcome,
-    exitCode: result.exitCode ?? undefined,
-    summary: result.summary,
-    failingStep: result.failingStep,
-    durationMs: result.durationMs,
-    creditsConsumed: result.creditsConsumed,
-    evidencePath: result.evidencePath,
-    testUrl: result.testUrl,
-    sessionDir: result.sessionDir,
-    ndjsonPath: result.ndjsonPath,
-    runEnd: result.runEnd,
-    stderr: result.stderr,
+    outcome: "pending",
+    summary: "Verification job queued for shared local runner. Awaiting genuine Kane CLI execution and synced results.",
     startedAt,
-    finishedAt: new Date().toISOString(),
-    source: opts?.source || "local",
-    jobId: opts?.jobId,
+    source: opts?.source || "runner",
+    jobId: job.id,
+    projectId,
+    requestedBy: opts?.requestedBy,
+    notes: "Kane CLI is never executed on the hosting server.",
   };
   await appendVerificationRecord(record);
   return record;

@@ -31,5 +31,54 @@ npm run dev
 ## Verification
 UI and browser verification for this project must use **Kane CLI** (not Playwright/Puppeteer/Selenium as a substitute for Kane verification). See `AGENTS.md` for required flags, evidence handling, and failure workflow.
 
+- `npm run kane:verify -- --url <real-url> --flow shell-nav [--headless]` — reusable local Kane CLI adapter (writes NDJSON/records under `data/verification/`).
+- `npm run kane:runner` — persistent Windows/local runner that connects to the deployed KAGURA coordinator, claims queued jobs, executes Kane CLI locally, and syncs genuine results back (never runs Kane on Vercel).
+
+## Windows runner (Stage 2)
+
+### Prerequisites
+1. **Node.js** and **npm** installed (project requires Node 20+; this repo has been used with Node 24 on Windows).
+2. **Kane CLI** installed and authenticated on this machine:
+   - Install/upgrade per Kane docs, then verify:
+     ```powershell
+     kane-cli --version
+     kane-cli whoami
+     ```
+3. **Google Chrome** installed (supported browser) and a dedicated writable Chrome profile available (proven profile path in this workspace): `data\verification\kane-chrome-profile`.
+4. Network access from this machine to the deployed KAGURA app URL you will test (if Vercel Deployment Protection is enabled, the runner must be able to reach the target; use an accessible URL/bypass/custom domain as configured).
+
+### Configure environment (local, gitignored)
+1. Copy the template and fill in real values (never commit secrets, never put the runner token in frontend/public vars):
+   ```powershell
+   Copy-Item .env.runner.example .env.runner
+   notepad .env.runner
+   ```
+2. Set at minimum:
+   - `KAGURA_APP_URL` = deployed KAGURA coordinator base URL (e.g. `https://<your-deployment>.vercel.app` or production domain)
+   - `KAGURA_RUNNER_TOKEN` = must match the server-side `KAGURA_RUNNER_TOKEN` configured in Vercel (runner auth is separate from dashboard user auth)
+   - `KANE_CLI_USER_AGENT=kilocode`
+3. Optional: `KAGURA_RUNNER_ID` (stable id; auto-generated/persisted to `data/verification/runner-id` if unset), `KAGURA_RUNNER_VERSION`, polling/heartbeat tuning.
+
+### Start the runner (PowerShell)
+```powershell
+Set-Location 'C:\Users\HP\AppData\Roaming\Kilo Desktop\chats\session-eMHkrI'
+npm run kane:runner
+```
+On successful startup/connect/auth you should see logs such as: `KAGURA RUNNER STARTED`, `Backend connected`, `Runner authenticated`, `Heartbeat successful`, then periodic `Checking for jobs...`.
+
+### Stop safely
+- Press `Ctrl+C` in the runner terminal (SIGINT). The runner stops claiming new jobs and, if a job is executing, finishes the current execution and attempts to sync its result before exiting.
+- Do not force-kill during result sync unless necessary; unsynced results are retained locally under `data\verification\pending-sync\` for recovery on next start.
+
+### How it behaves
+- One active job at a time. Claims via `/api/runner/claim`, heartbeats via `/api/runner/heartbeat`, completes via `/api/runner/complete` (Bearer `KAGURA_RUNNER_TOKEN`). HTTP 204 = no jobs available.
+- Executes genuine `kane-cli run --agent ...` locally with headless Chrome and the dedicated profile; parses NDJSON `run_end` and syncs real outcomes/evidence refs. No simulated results.
+- Retries transient network/sync failures with backoff and retains failed sync payloads locally (never discarded).
+
+### Server-side (Vercel) requirements
+- `DATABASE_URL` configured (durable jobs/records/heartbeat) and `KAGURA_RUNNER_TOKEN` set to the same secret used by the runner.
+- Vercel remains coordinator only (never executes Kane CLI).
+
+
 ## License
 TBD

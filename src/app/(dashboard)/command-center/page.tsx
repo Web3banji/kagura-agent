@@ -8,6 +8,7 @@ import { getObservationStatus } from "@/lib/github/observe";
 import { readObservedEvents } from "@/lib/github/store";
 import { RunPipelineButton } from "./run-button";
 import { ObserveButton } from "./observe-button";
+import { resolveProjectId } from "@/lib/verification/context";
 import { stageDetail, stageLabel, statusInfo } from "@/lib/ui-text";
 import Link from "next/link";
 
@@ -22,9 +23,10 @@ function stageStatusColor(status: string) {
 }
 
 export default async function CommandCenterPage() {
+  const projectId = await resolveProjectId();
   const pipeline = await getCurrentPipelineState();
   const [verifications, stories, runs, obsStatus, observedEvents] = await Promise.all([
-    readVerificationRecords(),
+    readVerificationRecords({ projectId, includeLegacy: true }),
     readStories(),
     readRuns(),
     getObservationStatus(),

@@ -3,11 +3,13 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { readVerificationRecords, summarizeOutcome } from "@/lib/verification/store";
 import { RerunVerificationButton } from "./rerun-button";
 import { statusInfo } from "@/lib/ui-text";
+import { resolveProjectId } from "@/lib/verification/context";
 
 export const dynamic = "force-dynamic";
 
 export default async function VerificationLabPage() {
-  const records = await readVerificationRecords();
+  const projectId = await resolveProjectId();
+  const records = await readVerificationRecords({ projectId, includeLegacy: true });
   const summary = summarizeOutcome(records);
   const latestInfo = statusInfo(summary.latest);
 

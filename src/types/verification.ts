@@ -31,6 +31,8 @@ export interface VerificationRecord {
   source?: "local" | "runner";
   jobId?: string;
   notes?: string;
+  projectId?: string;
+  requestedBy?: string;
 }
 
 export interface KaneRunResult {
@@ -53,20 +55,64 @@ export interface KaneRunResult {
   url?: string;
 }
 
+export type VerificationJobStatus =
+  | "pending"
+  | "claimed"
+  | "running"
+  | "completed"
+  | "failed"
+  | "did_not_start";
+
+export interface VerificationJobResult {
+  exitCode?: number;
+  outcome?: VerificationOutcome;
+  summary?: string;
+  failingStep?: string;
+  durationMs?: number;
+  creditsConsumed?: number;
+  evidencePath?: string;
+  testUrl?: string;
+  sessionDir?: string;
+  ndjsonPath?: string;
+  runEnd?: Record<string, unknown>;
+  stderr?: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
 export interface VerificationJob {
   id: string;
-  status: "pending" | "claimed" | "running" | "completed" | "failed";
+  status: VerificationJobStatus;
   flow: string;
   objective: string;
   url: string;
+  projectId?: string;
+  requestedBy?: string;
   chromeProfile?: string;
   headless?: boolean;
   timeout?: number;
   reason?: string;
   createdAt: string;
+  updatedAt?: string;
   claimedAt?: string;
+  leaseExpiresAt?: string;
+  startedAt?: string;
   completedAt?: string;
   claimedBy?: string;
+  runnerId?: string;
+  attempt?: number;
   recordId?: string;
   error?: string;
+  result?: VerificationJobResult;
+}
+
+export interface RunnerHeartbeat {
+  runnerId?: string;
+  status: "connected" | "disconnected";
+  version?: string;
+  lastHeartbeat?: string;
+  lastSuccessfulExecution?: string;
+  currentJobId?: string;
+  pendingJobs?: number;
+  note?: string;
 }

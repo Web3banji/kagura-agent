@@ -1,23 +1,22 @@
 import type { VerificationOutcome, VerificationRecord } from "@/types/verification";
 import { promises as fs } from "fs";
 import path from "path";
+import { hasDatabase, kvGet, kvSet } from "@/lib/db";
 
 const DATA_DIR = path.join(process.cwd(), "data", "verification");
-const RECORDS_FILE = path.join(DATA_DIR, "records.json");
+const LEGACY_RECORDS_FILE = path.join(DATA_DIR, "records.json");
 
-async function ensureStore() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  try {
-    await fs.access(RECORDS_FILE);
-  } catch {
-    await fs.writeFile(RECORDS_FILE, "[]", "utf8");
-  }
+function recordsKey(projectId?: string) {
+  return `verification:records:${projectId || "default"}`;
 }
 
-export async function readVerificationRecords(): Promise<VerificationRecord[]> {
-  await ensureStore();
-  const raw = await fs.readFile(RECORDS_FILE, "utf8");
+async function ensureDir() {
+  await fs.mkdir(DATA_DIR, { recursive: true });
+}
+
+async function readLegacyFile(): Promise<VerificationRecord[]> {
   try {
+    const raw = await fs.readFile(LEGACY_RECORDS_FILE, "utf8");
     const parsed = JSON.parse(raw) as VerificationRecord[];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
@@ -25,29 +24,133 @@ export async function readVerificationRecords(): Promise<VerificationRecord[]> {
   }
 }
 
-export async function writeVerificationRecords(records: VerificationRecord[]): Promise<void> {
-  await ensureStore();
-  await fs.writeFile(RECORDS_FILE, JSON.stringify(records, null, 2), "utf8");
+async function readLegacyDir(): Promise<VerificationRecord[]> {
+  const dir = path.join(DATA_DIR, "records");
+  try {
+    const files = await fs.readdir(dir);
+    const out: VerificationRecord[] = [];
+    for (const f of files.filter((x) => x.endsWith(".json"))) {
+      try {
+        const raw = await fs.readFile(path.join(dir, f), "utf8");
+        const parsed = JSON.parse(raw) as VerificationRecord;
+        if (parsed && parsed.id) out.push(parsed);
+      } catch {}
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+export async function readLegacyVerificationRecords(): Promise<VerificationRecord[]> {
+  const [a, b] = await Promise.all([readLegacyFile(), readLegacyDir()]);
+  const byId = new Map<string, VerificationRecord>();
+  for (const r of [...a, ...b]) byId.set(r.id, r);
+  return Array.from(byId.values()).sort(
+    (x, y) => new Date(y.startedAt || y.finishedAt || 0).getTime() - new Date(x.startedAt || x.finishedAt || 0).getTime(),
+  );
+}
+
+function mergeUnique(primary: VerificationRecord[], legacy: VerificationRecord[]): VerificationRecord[] {
+  const byId = new Map<string, VerificationRecord>();
+  for (const r of legacy) byId.set(r.id, r);
+  for (const r of primary) byId.set(r.id, r); // primary wins
+  return Array.from(byId.values()).sort(
+    (a, b) => new Date(b.startedAt || b.finishedAt || 0).getTime() - new Date(a.startedAt || a.finishedAt || 0).getTime(),
+  );
+}
+
+async function readDbRecords(projectId?: string): Promise<VerificationRecord[]> {
+  if (!hasDatabase()) return [];
+  const key = recordsKey(projectId);
+  const list = await kvGet<VerificationRecord[]>(key);
+  return Array.isArray(list) ? list : [];
+}
+
+async function writeDbRecords(records: VerificationRecord[], projectId?: string): Promise<void> {
+  await kvSet(recordsKey(projectId), records.slice(0, 500));
+}
+
+async function readFileRecords(): Promise<VerificationRecord[]> {
+  await ensureDir();
+  try {
+    const raw = await fs.readFile(LEGACY_RECORDS_FILE, "utf8");
+    const parsed = JSON.parse(raw) as VerificationRecord[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    try {
+      await fs.writeFile(LEGACY_RECORDS_FILE, "[]", "utf8");
+    } catch {}
+    return [];
+  }
+}
+
+async function writeFileRecords(records: VerificationRecord[]): Promise<void> {
+  await ensureDir();
+  await fs.writeFile(LEGACY_RECORDS_FILE, JSON.stringify(records, null, 2), "utf8");
+}
+
+export async function readVerificationRecords(opts?: { projectId?: string; requestedBy?: string; includeLegacy?: boolean }): Promise<VerificationRecord[]> {
+  const projectId = opts?.projectId;
+  const requestedBy = opts?.requestedBy;
+  let records: VerificationRecord[];
+  if (hasDatabase()) {
+    const primary = await readDbRecords(projectId);
+    const legacy = opts?.includeLegacy === false ? [] : await readLegacyVerificationRecords();
+    records = mergeUnique(primary, legacy);
+  } else {
+    records = await readFileRecords();
+  }
+  return records.filter((r) => {
+    if (projectId && r.projectId && r.projectId !== projectId) return false;
+    if (requestedBy && r.requestedBy && r.requestedBy !== requestedBy) return false;
+    return true;
+  });
+}
+
+export async function writeVerificationRecords(records: VerificationRecord[], projectId?: string): Promise<void> {
+  if (hasDatabase()) {
+    await writeDbRecords(records, projectId);
+    return;
+  }
+  await writeFileRecords(records);
 }
 
 export async function appendVerificationRecord(record: VerificationRecord): Promise<VerificationRecord> {
-  const records = await readVerificationRecords();
+  const projectId = record.projectId;
+  if (hasDatabase()) {
+    const records = await readDbRecords(projectId);
+    records.unshift(record);
+    await writeDbRecords(records, projectId);
+    return record;
+  }
+  const records = await readFileRecords();
   records.unshift(record);
-  await writeVerificationRecords(records);
+  await writeFileRecords(records);
   return record;
 }
 
 export async function upsertVerificationRecord(record: VerificationRecord): Promise<VerificationRecord> {
-  const records = await readVerificationRecords();
-  const idx = records.findIndex((r) => r.id === record.id);
-  if (idx >= 0) records[idx] = record;
+  const projectId = record.projectId;
+  if (hasDatabase()) {
+    const records = await readDbRecords(projectId);
+    const idx = records.findIndex((r) => r.id === record.id || (record.jobId && r.jobId === record.jobId));
+    if (idx >= 0) records[idx] = { ...records[idx], ...record };
+    else records.unshift(record);
+    await writeDbRecords(records, projectId);
+    return record;
+  }
+  const records = await readFileRecords();
+  const idx = records.findIndex((r) => r.id === record.id || (record.jobId && r.jobId === record.jobId));
+  if (idx >= 0) records[idx] = { ...records[idx], ...record };
   else records.unshift(record);
-  await writeVerificationRecords(records);
+  await writeFileRecords(records);
   return record;
 }
 
-export async function getVerificationRecord(id: string): Promise<VerificationRecord | undefined> {
-  return (await readVerificationRecords()).find((r) => r.id === id);
+export async function getVerificationRecord(id: string, opts?: { projectId?: string; requestedBy?: string }): Promise<VerificationRecord | undefined> {
+  const all = await readVerificationRecords({ projectId: opts?.projectId, requestedBy: opts?.requestedBy, includeLegacy: true });
+  return all.find((r) => r.id === id || r.jobId === id);
 }
 
 export function summarizeOutcome(records: VerificationRecord[]): {

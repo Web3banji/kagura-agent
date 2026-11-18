@@ -1,3 +1,5 @@
+import { createHash } from "crypto";
+
 export function getAdminToken(): string | undefined {
   return process.env.KAGURA_ADMIN_TOKEN || process.env.ECHOLOG_ADMIN_TOKEN || process.env.ADMIN_PASSWORD;
 }
@@ -36,4 +38,23 @@ export function unauthorizedResponse(message = "Unauthorized"): Response {
       "WWW-Authenticate": 'Basic realm="KAGURA Admin"',
     },
   });
+}
+
+export type AuthPrincipal = { userId: string; authorized: boolean; reason?: string };
+
+export function getRequestPrincipal(req: Request): AuthPrincipal {
+  const token = getAdminToken();
+  if (!token) {
+    const devOk = process.env.NODE_ENV !== "production" && !process.env.VERCEL;
+    return {
+      userId: devOk ? "local-dev" : "anonymous",
+      authorized: devOk,
+      reason: devOk ? undefined : "Admin authentication required",
+    };
+  }
+  if (isAdminAuthorized(req)) {
+    const userId = "admin:" + createHash("sha256").update(token).digest("hex").slice(0, 16);
+    return { userId, authorized: true };
+  }
+  return { userId: "anonymous", authorized: false, reason: "Unauthorized" };
 }

@@ -3,44 +3,42 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { getObservationStatus } from "@/lib/github/observe";
 import { aiConfigured } from "@/lib/ai/provider";
 import { readVerificationRecords } from "@/lib/verification/store";
+import { countPendingJobs, getRunnerHeartbeat } from "@/lib/verification/jobs";
+import { getRunnerToken } from "@/lib/auth/runner";
+import { resolveProjectId } from "@/lib/verification/context";
 import { GitHubConfigForm } from "./github-config-form";
 import { ObserveAction } from "./observe-action";
-import { execFile } from "child_process";
-import { promisify } from "util";
-import path from "path";
-import { promises as fs } from "fs";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
-const execFileAsync = promisify(execFile);
 
-async function kaneStatus() {
-  try {
-    const { stdout } = await execFileAsync("kane-cli", ["--version"], { cwd: process.cwd(), windowsHide: true, timeout: 8000 });
-    const version = stdout.trim().split(/\r?\n/)[0] || "installed";
-    let who = "unknown";
-    try {
-      const w = await execFileAsync("kane-cli", ["whoami"], { cwd: process.cwd(), windowsHide: true, timeout: 8000 });
-      who = w.stdout.trim().split(/\r?\n/)[0] || who;
-    } catch {}
-    const profile = path.resolve(process.cwd(), "data", "verification", "kane-chrome-profile");
-    let profileOk = false;
-    try { await fs.access(profile); profileOk = true; } catch {}
-    return { ok: true as const, version, who, profile, profileOk };
-  } catch (e) {
-    return { ok: false as const, error: e instanceof Error ? e.message : String(e) };
-  }
+function ageLabel(iso?: string): string {
+  if (!iso) return "never";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(ms)) return "unknown";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
 }
 
 export default async function SettingsPage() {
-  const [obs, ai, kane, verifications] = await Promise.all([
+  const projectId = await resolveProjectId();
+  const [obs, ai, heartbeat, pendingJobs, verifications] = await Promise.all([
     getObservationStatus(),
     Promise.resolve(aiConfigured()),
-    kaneStatus(),
-    readVerificationRecords(),
+    getRunnerHeartbeat(),
+    countPendingJobs(projectId),
+    readVerificationRecords({ projectId, includeLegacy: true }),
   ]);
   const latestVer = verifications[0];
+  const lastSuccessful = verifications.find((r) => r.outcome === "passed");
   const appUrl = process.env.KAGURA_APP_URL || process.env.ECHOLOG_APP_URL || "http://localhost:3000";
+  const runnerConfigured = !!getRunnerToken();
+  const runnerConnected = runnerConfigured && heartbeat.status === "connected";
 
   return (
     <div data-page="settings">
@@ -50,7 +48,7 @@ export default async function SettingsPage() {
       />
 
       <Panel title="What these settings do" className="mb-6">
-        <p className="text-sm text-muted leading-relaxed">KAGURA can work with a few connections: it can watch a GitHub project for updates, use an AI helper to write drafts, and run real tests on your app. You only need to change these if something isn’t connected or you want to point KAGURA at a different project.</p>
+        <p className="text-sm text-muted leading-relaxed">KAGURA can work with a few connections: it can watch a GitHub project for updates, use an AI helper to write drafts, and run real tests on your app via a shared local runner. You only need to change these if something isn’t connected or you want to point KAGURA at a different project.</p>
       </Panel>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -95,28 +93,33 @@ export default async function SettingsPage() {
           </details>
         </Panel>
 
-        <Panel title="Testing" description="Runs real checks on your app to see if things work.">
+        <Panel title="Testing runner" description="Real Kane CLI checks run on the shared authenticated local runner (not on the Vercel server) and sync genuine results back to KAGURA.">
           <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-muted">Test tool</span>
-            <StatusBadge status={kane.ok ? "passed" : "failed"} />
+            <span className="text-sm text-muted">Runner connectivity</span>
+            <StatusBadge status={runnerConnected ? "passed" : "blocked"} />
           </div>
           <div className="text-sm space-y-1">
-            {kane.ok ? (
-              <>
-                <p className="text-emerald-300">Ready on this computer.</p>
-                <p className="text-xs text-muted">Signed in as: <span className="text-fg break-all">{kane.who}</span></p>
-              </>
-            ) : (
-              <p className="text-rose-300">Not ready: {kane.error || "testing tool not available on this computer."}</p>
-            )}
-            <p className="text-xs text-muted">Latest test: {latestVer ? <><StatusBadge status={latestVer.outcome} /> <span className="ml-1">{new Date(latestVer.startedAt).toLocaleString()}</span></> : "none recorded yet"}</p>
+            <p className={runnerConnected ? "text-emerald-300" : "text-warning"}>
+              {runnerConnected ? "Connected — runner heartbeat is recent." : runnerConfigured ? "Disconnected — no recent runner heartbeat." : "Not configured — set KAGURA_RUNNER_TOKEN and start the local runner."}
+            </p>
+            <dl className="grid grid-cols-2 gap-2 text-xs mt-2">
+              <div><dt className="text-muted">Runner token</dt><dd className="font-medium text-fg">{runnerConfigured ? "Configured" : "Not set"}</dd></div>
+              <div><dt className="text-muted">Last heartbeat</dt><dd className="font-medium text-fg">{heartbeat.lastHeartbeat ? `${new Date(heartbeat.lastHeartbeat).toLocaleString()} (${ageLabel(heartbeat.lastHeartbeat)})` : "Never"}</dd></div>
+              <div><dt className="text-muted">Runner version</dt><dd className="font-medium text-fg break-all">{heartbeat.version || "Unknown"}</dd></div>
+              <div><dt className="text-muted">Pending jobs</dt><dd className="font-medium text-fg">{pendingJobs}</dd></div>
+              <div><dt className="text-muted">Last successful run</dt><dd className="font-medium text-fg">{heartbeat.lastSuccessfulExecution ? new Date(heartbeat.lastSuccessfulExecution).toLocaleString() : lastSuccessful?.finishedAt ? new Date(lastSuccessful.finishedAt).toLocaleString() : "None recorded"}</dd></div>
+              <div><dt className="text-muted">Latest test record</dt><dd className="font-medium text-fg">{latestVer ? <><StatusBadge status={latestVer.outcome} /> <span className="ml-1">{new Date(latestVer.startedAt).toLocaleString()}</span></> : "None"}</dd></div>
+            </dl>
+            {heartbeat.note ? <p className="text-xs text-muted mt-1">{heartbeat.note}</p> : null}
           </div>
           <details className="mt-3">
             <summary className="cursor-pointer text-xs text-accent">Technical details</summary>
             <div className="mt-2 text-xs text-muted space-y-1 break-all">
               <p>App address for tests: <code>{appUrl}</code></p>
-              {kane.ok ? <p>Tool version: {kane.version} · Browser profile: {kane.profile} ({kane.profileOk ? "present" : "missing"})</p> : null}
-              <p>Tests run on the local computer (not on the website host) and record real results only.</p>
+              <p>Project scope: <code>{projectId}</code></p>
+              {heartbeat.runnerId ? <p>Runner ID: <code>{heartbeat.runnerId}</code></p> : null}
+              {heartbeat.currentJobId ? <p>Current job: <code>{heartbeat.currentJobId}</code></p> : null}
+              <p>Status is based on actual runner heartbeats, not token presence. Kane CLI is never executed on the hosted server.</p>
             </div>
           </details>
         </Panel>
@@ -126,12 +129,12 @@ export default async function SettingsPage() {
             <p><span className="text-fg font-medium">Publishing:</span> drafts are only shared when you choose <strong>Approve &amp; publish</strong>. There is no automatic publishing.</p>
             <p><span className="text-fg font-medium">Public pages:</span> visitors can see the <Link href="/stories" className="text-accent underline">Published stories</Link> pages.</p>
             <p><span className="text-fg font-medium">Private/admin pages:</span> Home, history, tests, draft review, and settings are for managing KAGURA. On a live site these should be protected with an admin password/token.</p>
-            <p><span className="text-fg font-medium">Your secrets:</span> keys and passwords are stored on the server and are not shown in this app.</p>
+            <p><span className="text-fg font-medium">Your secrets:</span> keys, tokens, and passwords are stored on the server and are not shown in this app.</p>
           </div>
           <details className="mt-3">
             <summary className="cursor-pointer text-xs text-accent">Technical details</summary>
             <div className="mt-2 text-xs text-muted space-y-1">
-              <p>Admin protection uses <code>KAGURA_ADMIN_TOKEN</code> (or <code>ADMIN_PASSWORD</code>) when configured. Set <code>KAGURA_APP_URL</code> to your live site address for tests/links.</p>
+              <p>Admin protection uses <code>KAGURA_ADMIN_TOKEN</code> (or <code>ADMIN_PASSWORD</code>) when configured. Runner access uses a separate <code>KAGURA_RUNNER_TOKEN</code>. Set <code>KAGURA_APP_URL</code> to your live site address for tests/links.</p>
             </div>
           </details>
         </Panel>

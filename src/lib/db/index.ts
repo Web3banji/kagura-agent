@@ -32,7 +32,26 @@ export async function ensureDb(): Promise<void> {
           key TEXT PRIMARY KEY,
           value JSONB NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
+        );
+        CREATE TABLE IF NOT EXISTS verification_jobs (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL DEFAULT '',
+          requested_by TEXT NOT NULL DEFAULT '',
+          status TEXT NOT NULL,
+          payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          claimed_at TIMESTAMPTZ,
+          lease_expires_at TIMESTAMPTZ,
+          started_at TIMESTAMPTZ,
+          completed_at TIMESTAMPTZ,
+          claimed_by TEXT,
+          runner_id TEXT,
+          record_id TEXT,
+          error TEXT
+        );
+        CREATE INDEX IF NOT EXISTS verification_jobs_status_lease_idx ON verification_jobs (status, lease_expires_at);
+        CREATE INDEX IF NOT EXISTS verification_jobs_project_created_idx ON verification_jobs (project_id, created_at DESC);
       `);
     })();
   }

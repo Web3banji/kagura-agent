@@ -137,6 +137,12 @@ export async function runPipeline(trigger: "manual" | "observe" = "manual"): Pro
       });
       await updateRun(run.id, { verificationId: verificationRecord.id, verificationOutcome: verificationRecord.outcome });
 
+      if (verificationRecord.outcome === "pending" || verificationRecord.outcome === "running") {
+        const note = `Verification queued for the shared local runner and awaiting genuine results (job ${verificationRecord.jobId || verificationRecord.id}). No claim of pass/fail can be made until the runner syncs real Kane CLI output.`;
+        await updateRun(run.id, { status: "failed", finishedAt: new Date().toISOString(), error: note, stageUpdate: { stage: "VERIFY", status: "pending", note } });
+        await setPipelineState({ agentState: "failed", stage: "VERIFY", note, lastOutcome: "blocked", lastError: note, lastVerificationId: verificationRecord.id, lastRunAt: started });
+        return { run: (await (await import("./runs")).readRuns()).find(r => r.id === run.id), state: await getCurrentPipelineState(), observationSummary: `${observation.repo}: ${targetCommits.length} commit(s) analysed`, analysisReason: analysis.reason, verificationId: verificationRecord.id, verificationOutcome: verificationRecord.outcome, error: note };
+      }
       if (verificationRecord.outcome !== "passed") {
         const note = `Kane verification ${verificationRecord.outcome} (exit ${verificationRecord.exitCode ?? "n/a"}). ${verificationRecord.failingStep || verificationRecord.summary || "Inspect evidence and fix before claiming verified."}`;
         await updateRun(run.id, { status: "failed", finishedAt: new Date().toISOString(), error: note, stageUpdate: { stage: "VERIFY", status: "failed", error: note } });

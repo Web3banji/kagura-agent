@@ -5,6 +5,7 @@ import { readVerificationRecords } from "@/lib/verification/store";
 import { verificationToJournal } from "@/lib/journal/activity";
 import { readObservedEvents } from "@/lib/github/store";
 import { getObservationStatus } from "@/lib/github/observe";
+import { resolveProjectId } from "@/lib/verification/context";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
@@ -18,9 +19,10 @@ function eventKindLabel(type: string) {
 }
 
 export default async function JournalPage() {
+  const projectId = await resolveProjectId();
   const [stored, verifications, observed, obsStatus] = await Promise.all([
     readJournalEvents(),
-    readVerificationRecords(),
+    readVerificationRecords({ projectId, includeLegacy: true }),
     readObservedEvents(),
     getObservationStatus(),
   ]);

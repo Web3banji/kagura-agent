@@ -1,70 +1,69 @@
 import { NextResponse } from "next/server";
-import { randomUUID } from "crypto";
-import { runKane } from "@/lib/kane/runner";
-import { appendVerificationRecord, upsertVerificationRecord } from "@/lib/verification/store";
+import { getRequestPrincipal, unauthorizedResponse } from "@/lib/auth";
+import { readGitHubConfig, repoSlug } from "@/lib/github/config";
+import { enqueueJob } from "@/lib/verification/jobs";
+import { appendVerificationRecord } from "@/lib/verification/store";
 import type { VerificationRecord } from "@/types/verification";
-import path from "path";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
 
-const FLOW_OBJECTIVE = 'Go to the provided URL. Verify the page shows "KAGURA" and "Home & status". Click the "Activity history" link in the sidebar navigation and verify the Activity history page is displayed. Click the "Checks & tests" link in the sidebar navigation and verify the Checks & tests page is displayed. Click the "Published stories" link in the sidebar navigation and verify the Stories page is displayed. Return to "Home & status" and verify it is displayed.';
+const FLOW_OBJECTIVE =
+  'Go to the provided URL. Verify the page shows "KAGURA" and "Home & status". Click the "Activity history" link in the sidebar navigation and verify the Activity history page is displayed. Click the "Checks & tests" link in the sidebar navigation and verify the Checks & tests page is displayed. Click the "Published stories" link in the sidebar navigation and verify the Stories page is displayed. Return to "Home & status" and verify it is displayed.';
+
+async function resolveProjectId(): Promise<string> {
+  try {
+    const cfg = await readGitHubConfig();
+    return repoSlug(cfg) || "default";
+  } catch {
+    return "default";
+  }
+}
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json().catch(() => ({}))) as { flow?: string; url?: string };
-    const flow = body.flow || "shell-nav";
-    const url = body.url || process.env.KAGURA_APP_URL || (process.env.KAGURA_APP_URL || process.env.KAGURA_APP_URL) || "http://localhost:3000";
-    const profile = path.resolve(process.cwd(), "data", "verification", "kane-chrome-profile");
-    const startedAt = new Date().toISOString();
-    const tempId = randomUUID();
+    const principal = getRequestPrincipal(req);
+    if (!principal.authorized) return unauthorizedResponse(principal.reason || "Unauthorized");
 
-    const running: VerificationRecord = {
-      id: tempId,
+    const body = (await req.json().catch(() => ({}))) as { flow?: string; url?: string; objective?: string };
+    const flow = typeof body.flow === "string" && body.flow ? body.flow : "shell-nav";
+    const objective = typeof body.objective === "string" && body.objective.trim() ? body.objective.trim() : FLOW_OBJECTIVE;
+    const url =
+      (typeof body.url === "string" && body.url.trim()) ||
+      process.env.KAGURA_APP_URL ||
+      process.env.ECHOLOG_APP_URL ||
+      "http://localhost:3000";
+    const projectId = await resolveProjectId();
+    const now = new Date().toISOString();
+
+    const job = await enqueueJob({
       flow,
-      objective: FLOW_OBJECTIVE,
+      objective,
       url,
-      chromeProfile: profile,
-      outcome: "running",
-      startedAt,
-      source: "runner",
-    };
-    await appendVerificationRecord(running);
-
-    const result = await runKane({
-      objective: FLOW_OBJECTIVE,
-      url,
+      projectId,
+      requestedBy: principal.userId,
       headless: true,
-      timeoutSeconds: 180,
-      name: `kagura-${flow}`,
-      chromeProfile: profile,
+      timeout: 180,
+      reason: "dashboard",
     });
 
     const record: VerificationRecord = {
-      id: result.id || tempId,
+      id: job.id,
       flow,
-      objective: FLOW_OBJECTIVE,
-      command: result.command,
+      objective,
       url,
-      chromeProfile: profile,
-      outcome: result.outcome,
-      exitCode: result.exitCode ?? undefined,
-      summary: result.summary,
-      failingStep: result.failingStep,
-      durationMs: result.durationMs,
-      creditsConsumed: result.creditsConsumed,
-      evidencePath: result.evidencePath,
-      testUrl: result.testUrl,
-      sessionDir: result.sessionDir,
-      ndjsonPath: result.ndjsonPath,
-      runEnd: result.runEnd,
-      stderr: result.stderr,
-      startedAt,
-      finishedAt: new Date().toISOString(),
+      outcome: "pending",
+      summary: "Verification job queued. Awaiting shared runner execution.",
+      startedAt: now,
       source: "runner",
+      jobId: job.id,
+      projectId,
+      requestedBy: principal.userId,
+      notes: "Queued on server; Kane CLI runs only on the local authenticated runner.",
     };
-    await upsertVerificationRecord(record);
-    return NextResponse.json({ record });
+    await appendVerificationRecord(record);
+
+    // Backward-compatible shape: include `record` (pending) plus explicit job info.
+    return NextResponse.json({ ok: true, status: "pending", jobId: job.id, job, record });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
   }
