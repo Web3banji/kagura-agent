@@ -31,9 +31,14 @@ export async function ensureDb(): Promise<void> {
   if (!initPromise) {
     const run = (async () => {
       const p = getPool();
-      // Additive, idempotent initialization. Preserves existing tables/data.
-      // Existing: echolog_kv, verification_jobs (never dropped/renamed/reset).
-      await p.query(`
+      const client = await p.connect();
+      // Serialize DDL across concurrent processes/workers to avoid catalog deadlocks
+      // (e.g. concurrent CREATE INDEX IF NOT EXISTS on the same relations).
+      await client.query("SELECT pg_advisory_lock($1)", [918273645]);
+      try {
+        // Additive, idempotent initialization. Preserves existing tables/data.
+        // Existing: echolog_kv, verification_jobs (never dropped/renamed/reset).
+        await client.query(`
         CREATE TABLE IF NOT EXISTS echolog_kv (
           key TEXT PRIMARY KEY,
           value JSONB NOT NULL,
@@ -126,7 +131,55 @@ export async function ensureDb(): Promise<void> {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS oauth_states_expires_idx ON oauth_states (expires_at);
+
+        -- Multi-repo foundation (Stage 1, additive): repository connections authorized by users
+        -- and project-to-repository links. Does not modify existing global GitHub config/observation.
+        -- Composite unique (id, owner_user_id) keys support ownership-enforcing composite FKs.
+        CREATE UNIQUE INDEX IF NOT EXISTS projects_id_owner_unique_idx ON projects (id, owner_user_id);
+
+        CREATE TABLE IF NOT EXISTS repository_connections (
+          id TEXT PRIMARY KEY,
+          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          provider TEXT NOT NULL DEFAULT 'github',
+          provider_account_id TEXT,
+          github_repo_id TEXT NOT NULL,
+          repo_owner TEXT NOT NULL,
+          repo_name TEXT NOT NULL,
+          full_name TEXT NOT NULL,
+          default_branch TEXT,
+          is_private BOOLEAN,
+          permissions JSONB,
+          status TEXT NOT NULL DEFAULT 'active',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE (id, owner_user_id),
+          UNIQUE (owner_user_id, provider, github_repo_id)
+        );
+        CREATE INDEX IF NOT EXISTS repository_connections_owner_idx ON repository_connections (owner_user_id);
+        CREATE INDEX IF NOT EXISTS repository_connections_repo_idx ON repository_connections (provider, github_repo_id);
+
+        CREATE TABLE IF NOT EXISTS project_repository_links (
+          id TEXT PRIMARY KEY,
+          project_id TEXT NOT NULL,
+          repository_connection_id TEXT NOT NULL,
+          owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          UNIQUE (project_id, repository_connection_id),
+          FOREIGN KEY (project_id, owner_user_id)
+            REFERENCES projects(id, owner_user_id) ON DELETE CASCADE,
+          FOREIGN KEY (repository_connection_id, owner_user_id)
+            REFERENCES repository_connections(id, owner_user_id) ON DELETE RESTRICT
+        );
+        CREATE INDEX IF NOT EXISTS project_repository_links_project_idx ON project_repository_links (project_id);
+        CREATE INDEX IF NOT EXISTS project_repository_links_connection_idx ON project_repository_links (repository_connection_id);
+        CREATE INDEX IF NOT EXISTS project_repository_links_owner_idx ON project_repository_links (owner_user_id);
       `);
+      } finally {
+        try {
+          await client.query("SELECT pg_advisory_unlock($1)", [918273645]);
+        } catch {}
+        client.release();
+      }
     })().catch((err) => {
       // Allow retry on subsequent calls if initialization fails (e.g. transient DB error).
       // Do not cache a permanently rejected promise.

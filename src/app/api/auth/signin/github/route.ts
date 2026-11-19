@@ -19,7 +19,7 @@ export async function GET(req: Request) {
   const params = new URLSearchParams({
     client_id: process.env.GITHUB_CLIENT_ID!,
     redirect_uri: callback,
-    scope: "read:user user:email",
+    scope: "read:user user:email repo",
     state,
     allow_signup: "true",
   });

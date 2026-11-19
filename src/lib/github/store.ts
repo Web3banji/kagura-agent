@@ -1,13 +1,21 @@
 import { promises as fs } from "fs";
 import path from "path";
-import type { ObservedCommit, ObservationState } from "@/types/github";
-import { hasDatabase, isProductionRuntime, kvGet, kvSet } from "@/lib/db";
+import type { ObservedCommit, ObservationState, ProjectObservationState, ProjectObservedCommit } from "@/types/github";
+import { hasDatabase, isProductionRuntime, kvGet, kvSet, kvMutate } from "@/lib/db";
 
 const DATA_DIR = path.join(process.cwd(), "data", "github");
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 const EVENTS_FILE = path.join(DATA_DIR, "events.json");
 const STATE_KEY = "github:observation:state";
 const EVENTS_KEY = "github:observation:events";
+
+function projectStateKey(projectId: string, repositoryConnectionId: string): string {
+  return `github:observation:state:${projectId}:${repositoryConnectionId}`;
+}
+
+function projectEventsKey(projectId: string, repositoryConnectionId: string): string {
+  return `github:observation:events:${projectId}:${repositoryConnectionId}`;
+}
 
 function canWriteLocalFiles(): boolean {
   return !hasDatabase() && !isProductionRuntime();
@@ -148,5 +156,172 @@ export async function markCommitsProcessed(shas: string[]): Promise<void> {
 
 export async function getUnprocessedCommits(limit = 10): Promise<ObservedCommit[]> {
   const events = await readObservedEvents();
+  return events.filter((e) => !e.processed).slice(0, limit);
+}
+
+// Project-scoped storage functions
+
+export async function readProjectObservationState(
+  projectId: string,
+  repositoryConnectionId: string,
+): Promise<ProjectObservationState> {
+  const key = projectStateKey(projectId, repositoryConnectionId);
+  if (hasDatabase()) {
+    const db = await kvGet<ProjectObservationState>(key);
+    if (db && typeof db === "object" && !Array.isArray(db)) return db;
+    return {
+      projectId,
+      repositoryConnectionId,
+      githubRepoId: "",
+      fullName: "",
+    };
+  }
+  return {
+    projectId,
+    repositoryConnectionId,
+    githubRepoId: "",
+    fullName: "",
+  };
+}
+
+export async function writeProjectObservationState(state: ProjectObservationState): Promise<void> {
+  if (!hasDatabase()) return;
+  const key = projectStateKey(state.projectId, state.repositoryConnectionId);
+  
+  // Atomic mutation to prevent stale overwrites
+  // Only update if new state is newer (by lastObservedAt) or if it's a success overriding a failure
+  await kvMutate<ProjectObservationState>(key, (current: ProjectObservationState | undefined) => {
+    if (!current) return state;
+    
+    const newTime = state.lastObservedAt ? new Date(state.lastObservedAt).getTime() : 0;
+    const currentTime = current.lastObservedAt ? new Date(current.lastObservedAt).getTime() : 0;
+    
+    // If new observation is newer, take it
+    if (newTime > currentTime) return state;
+    
+    // If same time or older, prefer success over failure
+    if (newTime === currentTime && state.lastStatus === "success" && current.lastStatus === "failed") {
+      return state;
+    }
+    
+    // Otherwise keep current (more recent or equally recent non-failure)
+    return current;
+  });
+}
+
+export async function readProjectObservedEvents(
+  projectId: string,
+  repositoryConnectionId: string,
+): Promise<ProjectObservedCommit[]> {
+  const key = projectEventsKey(projectId, repositoryConnectionId);
+  if (hasDatabase()) {
+    const db = await kvGet<ProjectObservedCommit[]>(key);
+    if (Array.isArray(db)) return db;
+    return [];
+  }
+  return [];
+}
+
+export async function writeProjectObservedEvents(
+  projectId: string,
+  repositoryConnectionId: string,
+  events: ProjectObservedCommit[],
+): Promise<void> {
+  if (!hasDatabase()) return;
+  const key = projectEventsKey(projectId, repositoryConnectionId);
+  await kvSet(key, events);
+}
+
+export async function mergeProjectObservedCommits(
+  projectId: string,
+  repositoryConnectionId: string,
+  incoming: ProjectObservedCommit[],
+): Promise<{ merged: ProjectObservedCommit[]; added: ProjectObservedCommit[] }> {
+  const key = projectEventsKey(projectId, repositoryConnectionId);
+  if (!hasDatabase()) {
+    // Fallback for non-DB environments - use read-modify-write (not atomic)
+    const existing = await readProjectObservedEvents(projectId, repositoryConnectionId);
+    const bySha = new Map(existing.map((c) => [c.sha, c]));
+    const added: ProjectObservedCommit[] = [];
+    for (const c of incoming) {
+      if (!bySha.has(c.sha)) {
+        added.push(c);
+        bySha.set(c.sha, c);
+      } else {
+        const prev = bySha.get(c.sha)!;
+        bySha.set(c.sha, { ...prev, files: prev.files?.length ? prev.files : c.files, message: prev.message || c.message });
+      }
+    }
+    const merged = Array.from(bySha.values()).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    await writeProjectObservedEvents(projectId, repositoryConnectionId, merged);
+    return { merged, added };
+  }
+
+  // Atomic mutation using kvMutate
+  const result = await kvMutate<{ merged: ProjectObservedCommit[]; added: ProjectObservedCommit[] }>(
+    key,
+    (current: { merged: ProjectObservedCommit[]; added: ProjectObservedCommit[] } | undefined) => {
+      const existing = current?.merged ?? [];
+      const bySha = new Map(existing.map((c) => [c.sha, c]));
+      const added: ProjectObservedCommit[] = [];
+      for (const c of incoming) {
+        if (!bySha.has(c.sha)) {
+          added.push(c);
+          bySha.set(c.sha, c);
+        } else {
+          const prev = bySha.get(c.sha)!;
+          bySha.set(c.sha, { ...prev, files: prev.files?.length ? prev.files : c.files, message: prev.message || c.message });
+        }
+      }
+      const merged = Array.from(bySha.values()).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      return { merged, added };
+    },
+  );
+  return result;
+}
+
+export async function markProjectCommitsProcessed(
+  projectId: string,
+  repositoryConnectionId: string,
+  shas: string[],
+): Promise<void> {
+  if (!shas.length) return;
+  const key = projectEventsKey(projectId, repositoryConnectionId);
+  if (!hasDatabase()) {
+    // Fallback for non-DB environments
+    const events = await readProjectObservedEvents(projectId, repositoryConnectionId);
+    const set = new Set(shas);
+    let changed = false;
+    for (const e of events) {
+      if (set.has(e.sha) && !e.processed) {
+        e.processed = true;
+        changed = true;
+      }
+    }
+    if (changed) await writeProjectObservedEvents(projectId, repositoryConnectionId, events);
+    return;
+  }
+
+  // Atomic mutation using kvMutate
+  await kvMutate<ProjectObservedCommit[]>(key, (current: ProjectObservedCommit[] | undefined) => {
+    const events = current ?? [];
+    const set = new Set(shas);
+    let changed = false;
+    for (const e of events) {
+      if (set.has(e.sha) && !e.processed) {
+        e.processed = true;
+        changed = true;
+      }
+    }
+    return changed ? events : current;
+  });
+}
+
+export async function getProjectUnprocessedCommits(
+  projectId: string,
+  repositoryConnectionId: string,
+  limit = 10,
+): Promise<ProjectObservedCommit[]> {
+  const events = await readProjectObservedEvents(projectId, repositoryConnectionId);
   return events.filter((e) => !e.processed).slice(0, limit);
 }
