@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { PageHeader, Panel, EmptyState } from "@/components/ui/Primitives";
 import { Button, Input, Label, Notification } from "@/components/ui/elements";
 
+type Connection = { id: string; fullName?: string; repoOwner?: string; repoName?: string };
 type Project = {
   id: string;
   owner_user_id: string;
@@ -16,14 +17,25 @@ type Project = {
 };
 
 export default function ProjectsPage() {
-  const [projects, setProjects] = useState<Project[]>([]);
   const [creating, setCreating] = useState(false);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
+  const [connections, setConnections] = useState<Connection[]>([]);
+  const [selectedConnectionId, setSelectedConnectionId] = useState("");
+  const [connectionsLoading, setConnectionsLoading] = useState(true);
   const [msg, setMsg] = useState<{ kind: "success" | "error"; title: string; message?: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
+    fetch("/api/github/repositories/connections", { headers: { Accept: "application/json" } })
+      .then(async (res) => {
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setConnections(data.connections || []);
+      })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setConnectionsLoading(false); });
     fetch("/api/projects", { headers: { Accept: "application/json" } })
       .then(async (res) => {
         if (!res.ok) return;
@@ -38,13 +50,12 @@ export default function ProjectsPage() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    setCreating(true);
     setMsg(null);
     try {
       const res = await fetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, slug }),
+        body: JSON.stringify({ name, slug, repositoryConnectionId: selectedConnectionId }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Could not create project.");
@@ -80,9 +91,20 @@ export default function ProjectsPage() {
             <Label>Slug</Label>
             <Input value={slug} onChange={(e) => setSlug(e.target.value)} disabled={creating} placeholder="kagura-website" />
           </div>
-          <div className="sm:col-span-1 self-end">
-            <Button variant="primary" type="submit" disabled={creating || !name}>
-              {creating ? "Creating…" : "Create project"}
+          <div className="sm:col-span-2">
+            <Label>GitHub repository</Label>
+            <select value={selectedConnectionId} onChange={(e) => setSelectedConnectionId(e.target.value)} disabled={creating || connectionsLoading} className="mt-1 w-full rounded border border-border bg-panel-2 px-2 py-1.5 text-sm text-fg">
+              <option value="">{connectionsLoading ? "Loading repositories..." : "Select a repository"}</option>
+              {connections.map((c) => (
+                <option key={c.id} value={c.id}>{c.fullName || `${c.repoOwner}/${c.repoName}`}</option>
+              ))}
+            </select>
+            {!connectionsLoading && connections.length === 0 && (
+              <p className="mt-1 text-xs text-muted">No GitHub repositories connected. Connect one first.</p>
+            )}
+          </div>          <div className="sm:col-span-1 self-end">
+            <Button variant="primary" type="submit" disabled={creating || !name || !selectedConnectionId}>
+              {creating ? "Creatingâ€¦" : "Create project"}
             </Button>
           </div>
         </form>
