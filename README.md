@@ -82,3 +82,7 @@ On successful startup/connect/auth you should see logs such as: `KAGURA RUNNER S
 
 ## License
 TBD
+
+## Investigation storage limitations
+- Investigation storage uses KV/local filesystem. KV uses transactional row locking; local filesystem writes are atomic via temp+rename but cross-process concurrency is not globally locked.
+- Distributed atomic locking is not supported by this architecture.

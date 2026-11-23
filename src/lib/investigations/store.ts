@@ -92,7 +92,9 @@ export async function writeInvestigations(investigations: Investigation[]): Prom
     throw new Error("Durable investigation storage is not configured (DATABASE_URL missing in production).");
   }
   await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.writeFile(FILE, JSON.stringify(investigations, null, 2), "utf8");
+  const tmp = `${FILE}.${process.pid}.${Date.now()}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(investigations, null, 2), "utf8");
+  await fs.rename(tmp, FILE);
 }
 
 export async function getInvestigationById(id: string, scope?: RecordScope): Promise<Investigation | undefined> {
@@ -230,3 +232,4 @@ export async function appendVerificationReference(
   await writeInvestigations(res.next);
   return res.updated;
 }
+

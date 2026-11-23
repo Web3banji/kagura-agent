@@ -5,19 +5,14 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Button } from "../ui/elements";
 
-const WORKSPACE_NAV = [
-  { href: "/command-center", label: "Overview", hint: "What’s happening and what to do next" },
+const NAV = [
+  { href: "/command-center", label: "Overview", hint: "What KAGURA is and how to start" },
   { href: "/projects", label: "Projects", hint: "Your authorized projects" },
-  { href: "/journal", label: "Activity", hint: "Project changes and events" },
+  { href: "/journal", label: "Activity", hint: "Chronological project events" },
   { href: "/editorial", label: "Intelligence", hint: "Drafts, review, and publishing" },
   { href: "/verification", label: "Verification", hint: "Checks and test results" },
-  { href: "/reports", label: "Reports", hint: "Project reports" },
-];
-
-const MANAGE_NAV = [
-  { href: "/integrations", label: "Integrations", hint: "Connect project tools" },
-  { href: "/team", label: "Team", hint: "Workspace members" },
-  { href: "/settings", label: "Settings", hint: "Connections and preferences" },
+  { href: "/reports", label: "Reports", hint: "Published report library" },
+  { href: "/settings", label: "Settings", hint: "Account and preferences" },
 ];
 
 type ShellUser = {
@@ -33,7 +28,7 @@ export function Sidebar({ currentUser = null }: { currentUser?: ShellUser }) {
   const pathname = usePathname();
   const isActive = (href: string) => pathname === href || (href !== "/" && pathname.startsWith(href + "/"));
 
-  const renderNav = (items: typeof WORKSPACE_NAV, offset: number) =>
+  const renderNav = (items: typeof NAV, offset: number) =>
     items.map((item, index) => {
       const active = isActive(item.href);
       return (
@@ -82,9 +77,9 @@ export function Sidebar({ currentUser = null }: { currentUser?: ShellUser }) {
 
       <nav className="p-3 flex flex-col gap-1" aria-label="Main navigation">
         <h2 className="k-label mb-2">WORKSPACE</h2>
-        {renderNav(WORKSPACE_NAV, 0)}
-        <h2 className="k-label mt-6 mb-2">MANAGE</h2>
-        {renderNav(MANAGE_NAV, WORKSPACE_NAV.length)}
+        {renderNav(NAV, 0)}
+        
+        
       </nav>
 
       <div className="p-4 mt-auto border-t border-border">
@@ -112,3 +107,5 @@ export function Sidebar({ currentUser = null }: { currentUser?: ShellUser }) {
     </aside>
   );
 }
+
+
