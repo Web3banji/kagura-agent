@@ -53,7 +53,7 @@ export default async function CommandCenterPage() {
     <div data-page="command-center">
       <PageHeader
         title="Home & status"
-        subtitle="See what KAGURA is doing right now, check if your project was tested, and start a new check."
+        subtitle="See what KAGURA is doing for your project, what it found, and what to do next."
         actions={
           <div className="flex flex-col sm:flex-row gap-2 items-stretch sm:items-start w-full md:w-auto">
             <ObserveButton />
@@ -241,3 +241,4 @@ export default async function CommandCenterPage() {
     </div>
   );
 }
+
