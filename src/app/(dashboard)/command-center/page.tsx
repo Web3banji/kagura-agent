@@ -94,7 +94,7 @@ export default async function CommandCenterPage() {
             <div className="text-sm text-muted">Current step</div>
             <span className="text-sm font-medium text-accent" data-testid="pipeline-stage">{stageLabel(pipeline.stage)}</span>
           </div>
-          <p className="mt-3 text-sm text-fg/90">{pipeline.note}</p>
+          <p className="mt-3 text-sm text-fg/90">{pipeline.note}</p>\n          <p className="mt-2 text-xs text-muted">If testing could not run, your project has not been marked as passed or failed.</p>
           {pipeline.lastRunAt ? <p className="mt-2 text-xs text-muted">Last check: {new Date(pipeline.lastRunAt).toLocaleString()}</p> : <p className="mt-2 text-xs text-muted">No checks run yet.</p>}
           {pipeline.lastError ? <p className="mt-2 text-xs text-rose-300">Something needs attention: {pipeline.lastError}</p> : null}
         </Panel>
@@ -241,4 +241,5 @@ export default async function CommandCenterPage() {
     </div>
   );
 }
+
 
