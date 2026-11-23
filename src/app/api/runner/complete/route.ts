@@ -3,6 +3,7 @@ import { isRunnerAuthorized, runnerUnauthorized } from "@/lib/auth/runner";
 import { getJob, markRunnerSuccess, updateJob } from "@/lib/verification/jobs";
 import { upsertVerificationRecord } from "@/lib/verification/store";
 import type { VerificationJobResult, VerificationOutcome, VerificationRecord } from "@/types/verification";
+import { processVerificationResult } from "@/lib/investigations/processor";
 
 export const dynamic = "force-dynamic";
 
@@ -128,6 +129,70 @@ export async function POST(req: Request) {
     };
     await upsertVerificationRecord(record, { expectOwner: owner });
 
+    // --- Investigator integration ---
+    // Process the completed Kane result only for terminal outcomes. Non-terminal
+    // outcomes (pending/running) are skipped. Investigation processing is best-effort:
+    // errors here never corrupt the verification record or break the runner contract.
+    let investigationIds: string[] = [];
+    let investigationState: "pending" | "processing" | "processed" | "failed" = "processed";
+    if (outcome !== "pending" && outcome !== "running") {
+      // Concurrency protection: if processing is already in progress or complete,
+      // do not start a second processing attempt for the same verification.
+      const existingProcessing = record.investigationProcessing?.state;
+      if (existingProcessing === "processing" || existingProcessing === "processed") {
+        investigationIds = record.investigationIds ?? [];
+        investigationState = existingProcessing === "processed" ? "processed" : "processing";
+      } else {
+        // Mark processing as in-progress before starting.
+        await upsertVerificationRecord(
+          {
+            ...record,
+            investigationProcessing: {
+              state: "processing",
+              processingStartedAt: new Date().toISOString(),
+            },
+          },
+          { expectOwner: owner },
+        );
+        try {
+          const result = await processVerificationResult(record, {
+            ownerUserId: owner || undefined,
+            projectId: job.projectId || undefined,
+            repositoryConnectionId: undefined,
+          });
+          investigationIds = result.investigations.map((i) => i.id);
+          // Link the verification record to its investigation(s) and record processing state.
+          await upsertVerificationRecord(
+            {
+              ...record,
+              investigationIds,
+              investigationProcessing: {
+                state: "processed",
+                processedAt: new Date().toISOString(),
+              },
+            },
+            { expectOwner: owner },
+          );
+        } catch {
+          investigationState = "failed";
+          // Record the failure without marking the Kane verification itself as failed.
+          await upsertVerificationRecord(
+            {
+              ...record,
+              investigationIds,
+              investigationProcessing: {
+                state: "failed",
+                processingStartedAt: record.investigationProcessing?.processingStartedAt,
+                processedAt: new Date().toISOString(),
+                error: "Investigator processing failed; see recovery endpoint.",
+              },
+            },
+            { expectOwner: owner },
+          );
+        }
+      }
+    }
+
     const jobStatus = terminalJobStatus(outcome);
     const updated = await updateJob(job.id, {
       status: jobStatus,
@@ -142,7 +207,12 @@ export async function POST(req: Request) {
       await markRunnerSuccess(finishedAt);
     }
 
-    return NextResponse.json({ ok: true, job: updated, record });
+    return NextResponse.json({
+      ok: true,
+      job: updated,
+      record: { ...record, investigationIds, investigationProcessing: { state: investigationState, processedAt: new Date().toISOString() } },
+      investigationProcessed: outcome !== "pending" && outcome !== "running",
+    });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
   }

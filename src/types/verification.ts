@@ -30,6 +30,13 @@ export interface VerificationRecord {
   finishedAt?: string;
   source?: "local" | "runner";
   jobId?: string;
+  investigationIds?: string[];
+  investigationProcessing?: {
+    state: "pending" | "processing" | "processed" | "failed";
+    processingStartedAt?: string;
+    processedAt?: string;
+    error?: string;
+  };
   notes?: string;
   projectId?: string;
   requestedBy?: string;
