@@ -63,14 +63,10 @@ export async function upsertGitHubUser(
         ["github", profile.id, encAccessToken, encRefreshToken, tokenType, scope],
       );
     } else {
-      // Try match by github_id or email (link) - prefer github_id
+      // Bind strictly by stable GitHub provider account ID; never link accounts by email.
       let existing: Record<string, unknown> | undefined;
       const byGh = await client.query(`SELECT * FROM users WHERE github_id = $1 LIMIT 1`, [profile.id]);
       if (byGh.rows[0]) existing = byGh.rows[0] as Record<string, unknown>;
-      if (!existing && profile.email) {
-        const byEmail = await client.query(`SELECT * FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1`, [profile.email]);
-        if (byEmail.rows[0]) existing = byEmail.rows[0] as Record<string, unknown>;
-      }
 
       if (existing) {
         userId = String(existing.id);
@@ -159,3 +155,4 @@ export async function ensureBootstrapProjectForUser(userId: string): Promise<str
   );
   return id;
 }
+

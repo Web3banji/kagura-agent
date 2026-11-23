@@ -157,14 +157,10 @@ export async function assignBootstrapOwnerIfEligible(userId: string, email: stri
   const current = await getBootstrapOwnerUserId();
   if (current) return current === userId;
 
-  const allowedEmail = (process.env.KAGURA_BOOTSTRAP_OWNER_EMAIL || "").trim().toLowerCase();
-  const allowedGithub = (process.env.KAGURA_BOOTSTRAP_OWNER_GITHUB_LOGIN || "").trim().toLowerCase();
-  let eligible = false;
-  if (allowedEmail && email && email.toLowerCase() === allowedEmail) eligible = true;
-  if (allowedGithub && githubLogin && githubLogin.toLowerCase() === allowedGithub) eligible = true;
-  // Safe fallback: if there are no users marked bootstrap and this is the only user AND an explicit bootstrap env is not set,
-  // do NOT auto-assign (prevents first arbitrary registrant from claiming legacy data). Operator must configure env or claim via admin flow.
-  if (!eligible) return false;
+  // Dynamic workspace ownership: the first authenticated user to register becomes the
+  // bootstrap owner of the (single) workspace. No hardcoded GitHub identity is required.
+  void email;
+  void githubLogin;
 
   const client = await getPool().connect();
   try {
@@ -184,3 +180,4 @@ export async function assignBootstrapOwnerIfEligible(userId: string, email: stri
     client.release();
   }
 }
+
