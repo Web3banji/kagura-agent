@@ -1,13 +1,8 @@
-import { getStoryBySlug, readStories } from "@/lib/stories/store";
+import { getStoryBySlug } from "@/lib/stories/store";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
-
-export async function generateStaticParams() {
-  const stories = (await readStories()).filter((s) => s.status === "published");
-  return stories.map((s) => ({ slug: s.slug }));
-}
 
 export default async function StoryPage({ params }: { params: { slug: string } }) {
   const story = await getStoryBySlug(params.slug);
@@ -89,3 +84,4 @@ export default async function StoryPage({ params }: { params: { slug: string } }
     </article>
   );
 }
+

@@ -1,4 +1,4 @@
-import { observeGitHub } from "@/lib/github/observe";
+import { observeProjectRepositories } from "@/lib/github/observe-project";
 import { markCommitsProcessed, getUnprocessedCommits } from "@/lib/github/store";
 import { type Analysis } from "./analyse";
 import { verifyWithKane } from "./verify";
@@ -7,6 +7,7 @@ import { setPipelineState, getCurrentPipelineState } from "@/lib/pipeline";
 import { appendJournalEvent } from "@/lib/journal/store";
 import { upsertStory } from "@/lib/stories/store";
 import { createRun, updateRun, getActiveRun } from "./runs";
+import { resolveProjectIdsForUser } from "@/lib/verification/context";
 import type { PipelineState } from "@/types/agent";
 import type { AgentRun } from "@/types/run";
 import type { Story } from "@/types/story";
@@ -72,16 +73,34 @@ export async function runPipeline(
 
   try {
     // OBSERVE
-    await updateRun(run.id, { currentStage: "OBSERVE", stageUpdate: { stage: "OBSERVE", status: "running", note: "Fetching real repository commits via GitHub API..." } }, scope);
-    await setPipelineState({ agentState: "running", stage: "OBSERVE", note: "Observing repository activity...", lastRunAt: started, lastError: undefined });
+    await updateRun(run.id, { currentStage: "OBSERVE", stageUpdate: { stage: "OBSERVE", status: "running", note: "Fetching project-scoped repository activity..." } }, scope);
+    await setPipelineState({ agentState: "running", stage: "OBSERVE", note: "Observing project-scoped repository activity...", lastRunAt: started, lastError: undefined });
 
-    const observation = await observeGitHub();
-    if (observation.error) {
-      return fail("OBSERVE", `Observation failed: ${observation.error}`);
+    const userId = opts?.userId ?? null;
+    const projectIds = scope?.userId ? await resolveProjectIdsForUser(scope.userId) : [];
+    const projectId = projectIds.length > 0 ? projectIds[0] : undefined;
+
+    let observation: Awaited<ReturnType<typeof observeProjectRepositories>>;
+    if (projectId && userId) {
+      observation = await observeProjectRepositories(projectId, userId);
+    } else {
+      observation = {
+        projectId: projectId || "default",
+        totalRepositories: 0,
+        successfulRepositories: 0,
+        failedRepositories: 0,
+        totalCommits: 0,
+        totalNewCommits: 0,
+        repositories: [],
+        observedAt: new Date().toISOString(),
+      };
+    }
+    if (observation.failedRepositories > 0 && observation.totalNewCommits === 0) {
+      return fail("OBSERVE", `Observation failed: ${observation.repositories.map((r) => r.error).filter(Boolean).join("; ") || "No repositories connected to this project."}`);
     }
 
     // Determine commits to process: prefer truly new; if none, pick unprocessed stored (prevents reprocessing duplicates)
-    let targetCommits = observation.newCommits;
+    let targetCommits = observation.repositories.flatMap((r) => r.newCommits);
     if (targetCommits.length === 0) {
       targetCommits = await getUnprocessedCommits(5);
     }
@@ -89,17 +108,26 @@ export async function runPipeline(
     await appendJournalEvent({
       id: randomUUID(),
       type: "observation",
-      source: observation.source,
-      title: `Observed ${observation.repo}`,
-      summary: `Fetched ${observation.commits.length} commit(s), ${observation.newCommits.length} new. ${observation.note || ""}`.trim(),
+      source: "github-api",
+      title: `Observed ${observation.projectId}`,
+      summary: `Fetched ${observation.totalCommits} commit(s), ${observation.totalNewCommits} new.`,
       timestamp: observation.observedAt,
-      refs: observation.commits.slice(0, 5).map((c) => c.shortSha),
+      refs: observation.repositories.flatMap((r) => r.newCommits.slice(0, 5).map((c) => c.shortSha)),
     });
 
     await updateRun(run.id, {
       currentStage: "OBSERVE",
-      observation: { repo: observation.repo, source: observation.source, newCount: observation.newCommits.length, totalFetched: observation.commits.length },
-      stageUpdate: { stage: "OBSERVE", status: "completed", note: `Observed ${observation.commits.length} commits (${observation.newCommits.length} new).` },
+      observation: {
+        repo: observation.projectId,
+        source: "github-api",
+        newCount: observation.totalNewCommits,
+        totalFetched: observation.totalCommits,
+      },
+      stageUpdate: {
+        stage: "OBSERVE",
+        status: "completed",
+        note: `Observed ${observation.totalCommits} commits (${observation.totalNewCommits} new).`,
+      },
     }, scope);
 
     if (targetCommits.length === 0) {
@@ -109,7 +137,7 @@ export async function runPipeline(
         stageUpdate: { stage: "ANALYSE", status: "skipped", note },
       }, scope);
       await setPipelineState({ agentState: "completed", stage: "OBSERVE", note, lastOutcome: "success", lastError: undefined, lastRunAt: started });
-      return { run: (await (await import("./runs")).readRuns(scope)).find(r => r.id === run.id), state: await getCurrentPipelineState(), observationSummary: `${observation.repo}: ${observation.commits.length} commits fetched, 0 new.` };
+      return { run: (await (await import("./runs")).readRuns(scope)).find(r => r.id === run.id), state: await getCurrentPipelineState(), observationSummary: `${observation.projectId}: ${observation.totalCommits} commits fetched, 0 new.` };
     }
 
     // ANALYSE
@@ -144,15 +172,15 @@ export async function runPipeline(
 
       if (verificationRecord.outcome === "pending" || verificationRecord.outcome === "running") {
         const note = `Verification queued for the shared local runner and awaiting genuine results (job ${verificationRecord.jobId || verificationRecord.id}). No claim of pass/fail can be made until the runner syncs real Kane CLI output.`;
-        await updateRun(run.id, { status: "failed", finishedAt: new Date().toISOString(), error: note, stageUpdate: { stage: "VERIFY", status: "pending", note } }, scope);
-        await setPipelineState({ agentState: "failed", stage: "VERIFY", note, lastOutcome: "blocked", lastError: note, lastVerificationId: verificationRecord.id, lastRunAt: started });
-        return { run: (await (await import("./runs")).readRuns(scope)).find(r => r.id === run.id), state: await getCurrentPipelineState(), observationSummary: `${observation.repo}: ${targetCommits.length} commit(s) analysed`, analysisReason: analysis.reason, verificationId: verificationRecord.id, verificationOutcome: verificationRecord.outcome, error: note };
+        await updateRun(run.id, { status: "running", error: note, stageUpdate: { stage: "VERIFY", status: "pending", note } }, scope);
+        await setPipelineState({ agentState: "running", stage: "VERIFY", note, lastOutcome: "blocked", lastError: note, lastVerificationId: verificationRecord.id, lastRunAt: started });
+        return { run: (await (await import("./runs")).readRuns(scope)).find(r => r.id === run.id), state: await getCurrentPipelineState(), observationSummary: `${observation.projectId}: ${targetCommits.length} commit(s) analysed`, analysisReason: analysis.reason, verificationId: verificationRecord.id, verificationOutcome: verificationRecord.outcome, error: note };
       }
       if (verificationRecord.outcome !== "passed") {
         const note = `Kane verification ${verificationRecord.outcome} (exit ${verificationRecord.exitCode ?? "n/a"}). ${verificationRecord.failingStep || verificationRecord.summary || "Inspect evidence and fix before claiming verified."}`;
         await updateRun(run.id, { status: "failed", finishedAt: new Date().toISOString(), error: note, stageUpdate: { stage: "VERIFY", status: "failed", error: note } }, scope);
         await setPipelineState({ agentState: "failed", stage: "VERIFY", note, lastOutcome: verificationRecord.outcome === "did_not_start" ? "blocked" : "failed", lastError: note, lastVerificationId: verificationRecord.id, lastRunAt: started });
-        return { run: (await (await import("./runs")).readRuns(scope)).find(r => r.id === run.id), state: await getCurrentPipelineState(), observationSummary: `${observation.repo}: ${targetCommits.length} commit(s) analysed`, analysisReason: analysis.reason, verificationId: verificationRecord.id, verificationOutcome: verificationRecord.outcome, error: note };
+        return { run: (await (await import("./runs")).readRuns(scope)).find(r => r.id === run.id), state: await getCurrentPipelineState(), observationSummary: `${observation.projectId}: ${targetCommits.length} commit(s) analysed`, analysisReason: analysis.reason, verificationId: verificationRecord.id, verificationOutcome: verificationRecord.outcome, error: note };
       }
       await updateRun(run.id, { stageUpdate: { stage: "VERIFY", status: "completed", note: verificationRecord.summary || "Verification passed." } }, scope);
     } else {
@@ -165,13 +193,13 @@ export async function runPipeline(
 
     const draft = await generateDraft(
       {
-        repo: observation.repo,
-        source: observation.source,
+        repo: observation.projectId,
+        source: "github-api",
         commits: targetCommits.map((c) => ({ sha: c.sha, shortSha: c.shortSha, message: c.message, date: c.date, author: c.author, url: c.url })),
         changedFiles: Array.from(new Set(targetCommits.flatMap((c) => c.files.map((f) => f.filename)))).slice(0, 40),
-        summary: `Observed ${targetCommits.length} commit(s) from ${observation.repo} (${observation.source}).`,
+        summary: `Observed ${targetCommits.length} commit(s) from ${observation.projectId} (github-api).`,
         observedAt: observation.observedAt,
-        note: observation.note,
+        note: undefined,
       },
       analysis,
       verificationRecord,
@@ -203,7 +231,7 @@ export async function runPipeline(
     return {
       run: (await (await import("./runs")).readRuns(scope)).find(r => r.id === run.id),
       state: await getCurrentPipelineState(),
-      observationSummary: `${observation.repo}: ${observation.commits.length} fetched, ${observation.newCommits.length} new, ${targetCommits.length} processed.`,
+      observationSummary: `${observation.projectId}: ${observation.totalCommits} fetched, ${observation.totalNewCommits} new, ${targetCommits.length} processed.`,
       analysisReason: analysis.reason,
       verificationId: verificationRecord?.id,
       verificationOutcome: verificationRecord?.outcome,

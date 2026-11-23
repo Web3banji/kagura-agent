@@ -163,6 +163,7 @@ export async function ensureDb(): Promise<void> {
           project_id TEXT NOT NULL,
           repository_connection_id TEXT NOT NULL,
           owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          link_status TEXT NOT NULL DEFAULT 'legacy' CHECK (link_status IN ('active', 'legacy')),
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           UNIQUE (project_id, repository_connection_id),
           FOREIGN KEY (project_id, owner_user_id)
@@ -170,9 +171,70 @@ export async function ensureDb(): Promise<void> {
           FOREIGN KEY (repository_connection_id, owner_user_id)
             REFERENCES repository_connections(id, owner_user_id) ON DELETE RESTRICT
         );
+
+        -- Existing-table upgrade (Stage 3.3.8, additive/idempotent):
+        -- Supports databases created before link_status existed. Preserves valid active/legacy
+        -- values, classifies missing/invalid rows as legacy, and never deletes/reassigns links.
+        ALTER TABLE project_repository_links
+          ADD COLUMN IF NOT EXISTS link_status TEXT DEFAULT 'legacy';
+        UPDATE project_repository_links
+          SET link_status = 'legacy'
+          WHERE link_status IS NULL OR link_status NOT IN ('active', 'legacy');
+        ALTER TABLE project_repository_links
+          ALTER COLUMN link_status SET DEFAULT 'legacy';
+        ALTER TABLE project_repository_links
+          ALTER COLUMN link_status SET NOT NULL;
+        DO $$
+        DECLARE
+          constraint_defs text[];
+          def text;
+          normalized text;
+          has_equivalent boolean := false;
+        BEGIN
+          SELECT array_agg(pg_get_constraintdef(c.oid) ORDER BY c.conname)
+          INTO constraint_defs
+          FROM pg_constraint c
+          JOIN pg_class t ON t.oid = c.conrelid
+          JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE t.relname = 'project_repository_links'
+            AND n.nspname = current_schema()
+            AND c.contype = 'c'
+            AND pg_get_constraintdef(c.oid) LIKE '%link_status%';
+
+          IF constraint_defs IS NOT NULL THEN
+            FOREACH def IN ARRAY constraint_defs LOOP
+              normalized := lower(regexp_replace(def, '[[:space:]]+', '', 'g'));
+              normalized := replace(normalized, '"', '');
+              normalized := replace(normalized, '''', '');
+              IF normalized = 'check((link_status=any(array[active::text,legacy::text])))'
+                 OR normalized = 'check(link_status=any(array[active::text,legacy::text]))'
+                 OR normalized = 'check((link_statusin(active,legacy)))'
+                 OR normalized = 'check(link_statusin(active,legacy))' THEN
+                has_equivalent := true;
+              ELSE
+                RAISE EXCEPTION 'Incompatible existing link_status CHECK constraint on project_repository_links: %', def;
+              END IF;
+            END LOOP;
+          END IF;
+
+          IF NOT has_equivalent THEN
+            ALTER TABLE project_repository_links
+              ADD CONSTRAINT project_repository_links_link_status_check
+              CHECK (link_status IN ('active', 'legacy'));
+          END IF;
+        END $$;
+
         CREATE INDEX IF NOT EXISTS project_repository_links_project_idx ON project_repository_links (project_id);
         CREATE INDEX IF NOT EXISTS project_repository_links_connection_idx ON project_repository_links (repository_connection_id);
         CREATE INDEX IF NOT EXISTS project_repository_links_owner_idx ON project_repository_links (owner_user_id);
+
+        -- Single-repository enforcement (Stage 3.3):
+        -- At most one active repository link per project.
+        CREATE UNIQUE INDEX IF NOT EXISTS project_repository_links_active_project_idx
+          ON project_repository_links (project_id) WHERE link_status = 'active';
+        -- At most one active project assignment per repository connection per owner.
+        CREATE UNIQUE INDEX IF NOT EXISTS project_repository_links_active_connection_owner_idx
+          ON project_repository_links (repository_connection_id, owner_user_id) WHERE link_status = 'active';
       `);
       } finally {
         try {

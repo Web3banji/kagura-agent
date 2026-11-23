@@ -288,9 +288,12 @@ export async function getRunnerHeartbeat(): Promise<RunnerHeartbeat> {
 }
 
 export function outcomeFromJobStatus(status: VerificationJobStatus): VerificationOutcome {
-  if (status === "completed") return "passed"; // caller should override with actual
-  if (status === "failed") return "failed";
+  // A job's status alone never implies a successful Kane verification.
+  // "completed" only means the runner finished the job; the actual Kane
+  // execution result (runEnd.status / exit code) must be consulted to
+  // determine passed vs failed.
   if (status === "did_not_start") return "did_not_start";
+  if (status === "failed") return "failed";
   if (status === "running" || status === "claimed") return "running";
   return "pending";
 }

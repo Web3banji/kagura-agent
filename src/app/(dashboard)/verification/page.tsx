@@ -6,19 +6,57 @@ import { statusInfo } from "@/lib/ui-text";
 import { resolveProjectId } from "@/lib/verification/context";
 import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
 import { scopeForPrincipal } from "@/lib/auth/scope";
+import { getPool, ensureDb, hasDatabase } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export default async function VerificationLabPage() {
   const principal = await getServerPrincipal();
   const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
-  const projectId = await resolveProjectId();
-  const records = await readVerificationRecords({
-    projectId,
-    includeLegacy: !!scope.includeLegacy,
-    requestedBy: scope.privileged ? undefined : principal.userId,
-  });
-  const summary = summarizeOutcome(records);
+
+  // Resolve the user's projects to retrieve verification records for all of them.
+  // Do not assume the currently configured global GitHub repository is the only project.
+  let projectIds: string[] = [];
+  if (scope.userId && hasDatabase()) {
+    try {
+      await ensureDb();
+      const res = await getPool().query(
+        "SELECT id FROM projects WHERE owner_user_id = $1 ORDER BY created_at DESC",
+        [scope.userId],
+      );
+      projectIds = res.rows.map((r: { id: string }) => r.id).filter(Boolean);
+    } catch {
+      // Fall back to a single project ID from GitHub config.
+    }
+  }
+  if (!projectIds.length) {
+    const single = await resolveProjectId();
+    if (single) projectIds.push(single);
+  }
+
+  // Fetch records for each project and merge, deduplicating by record id.
+  const allRecords: Awaited<ReturnType<typeof readVerificationRecords>> = [];
+  const seenIds = new Set<string>();
+  for (const projectId of projectIds) {
+    const records = await readVerificationRecords({
+      projectId,
+      includeLegacy: !!scope.includeLegacy,
+      requestedBy: scope.privileged ? undefined : principal.userId,
+    });
+    for (const r of records) {
+      if (!seenIds.has(r.id)) {
+        seenIds.add(r.id);
+        allRecords.push(r);
+      }
+    }
+  }
+  allRecords.sort(
+    (a, b) =>
+      new Date(b.startedAt || b.finishedAt || 0).getTime() -
+      new Date(a.startedAt || a.finishedAt || 0).getTime(),
+  );
+
+  const summary = summarizeOutcome(allRecords);
   const latestInfo = statusInfo(summary.latest);
 
   return (
@@ -50,15 +88,15 @@ export default async function VerificationLabPage() {
         <Panel title="Couldn’t run"><div className="text-2xl font-semibold text-amber-300">{summary.blocked}</div><p className="text-xs text-muted mt-1">Tests blocked by setup or connection issues.</p></Panel>
       </div>
 
-      <Panel title={`Test history (${records.length})`} description="Newest results appear first. Open “Technical details” on a result if you need deeper information.">
-        {records.length === 0 ? (
+      <Panel title={`Test history (${allRecords.length})`} description="Newest results appear first. Open “Technical details” on a result if you need deeper information.">
+        {allRecords.length === 0 ? (
           <EmptyState
             title="No tests have been run yet"
             detail="Click “Run a test now” to check that the main parts of your app work. You can also start a full check from the Home page, which may run a test when needed. Only real results will appear here."
           />
         ) : (
           <ul className="space-y-3">
-            {records.map((r) => {
+            {allRecords.map((r) => {
               const info = statusInfo(r.outcome);
               return (
                 <li key={r.id} className="rounded-lg border border-border bg-panel-2/40 p-4">
@@ -66,6 +104,9 @@ export default async function VerificationLabPage() {
                     <div className="flex items-center gap-2 flex-wrap">
                       <StatusBadge status={r.outcome} />
                       <span className="text-sm font-medium text-fg">{r.flow === "shell-nav" ? "Main pages check" : r.flow}</span>
+                      {r.projectId && (
+                        <span className="text-[10px] text-muted/70 bg-muted/50 px-1.5 py-0.5 rounded">{r.projectId.slice(0, 8)}…</span>
+                      )}
                     </div>
                     <div className="text-xs text-muted">
                       {new Date(r.startedAt).toLocaleString()}

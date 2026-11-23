@@ -78,6 +78,7 @@ export interface ProjectRepositoryObservationResult {
     resetAt: string | null;
     retryAfterSeconds: number | null;
   };
+  link_status: "active" | "legacy";
 }
 
 export interface ProjectObservationResult {

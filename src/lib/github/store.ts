@@ -257,27 +257,36 @@ export async function mergeProjectObservedCommits(
     return { merged, added };
   }
 
-  // Atomic mutation using kvMutate
-  const result = await kvMutate<{ merged: ProjectObservedCommit[]; added: ProjectObservedCommit[] }>(
-    key,
-    (current: { merged: ProjectObservedCommit[]; added: ProjectObservedCommit[] } | undefined) => {
-      const existing = current?.merged ?? [];
-      const bySha = new Map(existing.map((c) => [c.sha, c]));
-      const added: ProjectObservedCommit[] = [];
-      for (const c of incoming) {
-        if (!bySha.has(c.sha)) {
-          added.push(c);
-          bySha.set(c.sha, c);
-        } else {
-          const prev = bySha.get(c.sha)!;
-          bySha.set(c.sha, { ...prev, files: prev.files?.length ? prev.files : c.files, message: prev.message || c.message });
-        }
+  // Read existing events first to calculate added
+  const existingBefore = await readProjectObservedEvents(projectId, repositoryConnectionId);
+  const existingShaSet = new Set(existingBefore.map(c => c.sha));
+  // Also deduplicate within incoming array
+  const incomingShaSet = new Set<string>();
+  const added: ProjectObservedCommit[] = [];
+  for (const c of incoming) {
+    if (!existingShaSet.has(c.sha) && !incomingShaSet.has(c.sha)) {
+      added.push(c);
+      incomingShaSet.add(c.sha);
+    }
+  }
+
+  // Atomic mutation using kvMutate - works with raw array format
+  const result = await kvMutate<ProjectObservedCommit[]>(key, (current: ProjectObservedCommit[] | undefined) => {
+    const existing = current ?? [];
+    const bySha = new Map(existing.map((c) => [c.sha, c]));
+    for (const c of incoming) {
+      if (!bySha.has(c.sha)) {
+        bySha.set(c.sha, c);
+      } else {
+        const prev = bySha.get(c.sha)!;
+        bySha.set(c.sha, { ...prev, files: prev.files?.length ? prev.files : c.files, message: prev.message || c.message });
       }
-      const merged = Array.from(bySha.values()).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-      return { merged, added };
-    },
-  );
-  return result;
+    }
+    const merged = Array.from(bySha.values()).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return merged;
+  });
+
+  return { merged: result, added };
 }
 
 export async function markProjectCommitsProcessed(
@@ -306,14 +315,12 @@ export async function markProjectCommitsProcessed(
   await kvMutate<ProjectObservedCommit[]>(key, (current: ProjectObservedCommit[] | undefined) => {
     const events = current ?? [];
     const set = new Set(shas);
-    let changed = false;
     for (const e of events) {
       if (set.has(e.sha) && !e.processed) {
         e.processed = true;
-        changed = true;
       }
     }
-    return changed ? events : current;
+    return events;
   });
 }
 
