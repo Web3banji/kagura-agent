@@ -3,9 +3,9 @@ import type { VerificationOutcome } from "@/types/verification";
 export const PIPELINE_STEPS = [
   { id: "OBSERVE", label: "Check for changes", detail: "Looks at your project for new work (like code updates)." },
   { id: "ANALYSE", label: "Understand changes", detail: "Figures out what changed and what matters." },
-  { id: "VERIFY", label: "Test it", detail: "Runs real checks to see if things work as expected." },
-  { id: "WRITE", label: "Write a draft", detail: "Creates a story draft based on real evidence." },
-  { id: "REVIEW", label: "Review", detail: "You read and edit the draft before sharing it." },
+  { id: "VERIFY", label: "Test the project", detail: "Runs real checks to see if things work as expected." },
+  { id: "WRITE", label: "Explain findings and generate resolution prompts", detail: "Creates explanations and fix prompts from real evidence." },
+  { id: "DRAFT", label: "Create intelligence drafts", detail: "Prepares intelligence drafts from verified evidence." },
   { id: "PUBLISH", label: "Publish", detail: "Makes the approved story visible on the Stories page." },
 ] as const;
 
@@ -47,3 +47,4 @@ export function statusInfo(status: string): { label: string; description: string
       return { label: String(status).replace(/_/g, " "), description: "" };
   }
 }
+
