@@ -1,88 +1,188 @@
 # KAGURA
 
-KAGURA — an autonomous development agent that verifies its work with Kane CLI and publishes factual stories about its own evolution.
+KAGURA is a developer verification and investigation platform built around GitHub activity and Kane CLI.
 
-> **Status:** repository and environment preparation in progress. Integrations (GitHub observation, PostgreSQL, AI provider, Kane-authenticated browser verification) are not yet configured and no application features are claimed complete.
+Its purpose is to help developers identify, understand, investigate, and resolve genuine application issues discovered during verification.
 
-## What this project is
-KAGURA is intended to implement a genuine agent workflow:
+KAGURA does not replace a developer's coding agent. It does not treat every commit as a bug. GitHub activity alone is not proof of an application defect. Kane CLI is the external verification tool KAGURA integrates with. KAGURA processes verification outcomes and manages the resulting investigations. Developers remain in control of code changes using their preferred coding agent.
 
-`OBSERVE → ANALYSE → VERIFY → WRITE → REVIEW → PUBLISH`
+## Table of Contents
 
-- **Observe:** retrieve actual repository/development activity.
-- **Analyse:** identify meaningful changes worth documenting.
-- **Verify:** execute relevant UI/feature checks through Kane CLI and read real results.
-- **Write:** generate drafts grounded in commits and verification evidence (distinguishing verified facts from unverified claims).
-- **Review:** owner reviews/edits/approves drafts.
-- **Publish:** approved articles appear on a public blog.
+- [Overview](#overview)
+- [Core Idea](#core-idea)
+- [Product Workflow](#product-workflow)
+- [Investigation System](#investigation-system)
+- [Architecture](#architecture)
+- [API Surface](#api-surface)
+- [Installation and Local Development](#installation-and-local-development)
+- [Environment Variables](#environment-variables)
+- [Implementation Status](#implementation-status)
+- [Future Direction](#future-direction)
+- [Validation](#validation)
 
-## Current workspace state
-- Next.js (App Router, TypeScript, Tailwind) scaffold present at repository root.
-- `AGENTS.md` defines mandatory Kane CLI development workflow for this repo.
-- `.env`/secrets and Kane evidence are gitignored; use `.env.example` as a template (no real credentials committed).
+## Overview
 
-## Local development (scaffold)
+KAGURA helps developers turn real verification evidence into structured, actionable investigations.
+
+The central idea is:
+
+**GitHub activity provides the trigger and context. Kane CLI provides verification evidence. KAGURA turns actionable failures into structured investigations that developers can understand and resolve.**
+
+## Product Workflow
+
+1. A developer signs in and connects GitHub.
+2. The developer selects or connects a repository/project.
+3. KAGURA observes relevant repository activity.
+4. Relevant changes can trigger a Kane CLI verification job.
+5. The runner claims and executes the verification job.
+6. Kane CLI verifies application behaviour and produces results/evidence.
+7. KAGURA processes the verification outcome.
+8. Only genuine, actionable failures supported by evidence should become investigations.
+9. KAGURA provides a technical explanation, a plain-language explanation, and an issue-specific fix prompt.
+10. The developer uses their preferred AI coding agent to implement the fix.
+11. Subsequent repository activity can trigger another verification.
+12. KAGURA uses subsequent verification evidence to update or resolve the investigation when appropriate.
+
+```mermaid
+flowchart LR
+    GitHub[GitHub Activity] --> KAGURA[KAGURA]
+    KAGURA --> Runner[Local Kane Runner]
+    Runner --> Kane[Kane CLI]
+    Kane --> Runner
+    Runner --> KAGURA
+    KAGURA --> Investigation[Investigation Store]
+    Investigation --> Developer[Developer Coding Agent]
+    Developer --> GitHub
+```
+
+## Investigation System
+
+An investigation represents a genuine, actionable application issue supported by verification evidence.
+
+Verification results become investigations only when the outcome is actionable. Repeated findings are matched and updated rather than duplicated. Investigation records are linked to verification records. Technical explanations and plain-language explanations are generated from evidence. Fix prompts are produced for external AI coding agents. Subsequent successful verification can resolve an investigation when matching evidence supports it. Duplicate processing is handled. Failed processing can be retried. Stale processing is recovered.
+
+Processing lifecycle:
+
+`pending → processing → processed`
+
+There is also a `failed` processing state with retry and recovery behaviour.
+
+Investigation processing state is distinct from the actual status of an investigation.
+
+### Verification rules
+
+- A failed verification must have meaningful evidence before it becomes an actionable investigation.
+- Blocked jobs are not automatically application bugs.
+- Jobs that never started are not application bugs.
+- Infrastructure failures and timeouts without confirmed application failure must not be reported as confirmed application defects.
+- Passing verification should only resolve an investigation when the matching evidence supports that conclusion.
+
+Never present infrastructure failures as application defects.
+
+## Architecture
+
+| Component | Responsibility | Relevant files |
+|---|---|---|
+| Next.js app/dashboard | UI and server rendering | `src/app/(dashboard)` |
+| Authentication | GitHub OAuth and session | `src/lib/auth` |
+| GitHub integration | Repository discovery/observation | `src/lib/github` |
+| Projects | Project CRUD and ownership | `src/app/api/projects` |
+| Verification | Kane results and records | `src/lib/verification` |
+| Investigations | Processor and store | `src/lib/investigations` |
+| Runner | Local Kane execution | `scripts/kane-runner.mjs` |
+| AI | Server-side Gemini integration | `src/lib/ai` |
+| Stories/editorial | Drafts and publication | `src/lib/stories` |
+
+Components communicate through API routes, shared server modules, and KV/local storage.
+
+## API Surface
+
+Important endpoints:
+
+- `GET /api/investigations` — list investigations.
+- `GET /api/investigations/[id]` — get one investigation.
+- `POST /api/investigations/reprocess` — retry/reprocess.
+- `GET /api/projects` — list projects.
+- `POST /api/projects` — create project.
+- `GET /api/github/repositories` — discover repositories.
+- `POST /api/github/repositories/connect` — connect repository.
+- `POST /api/runner/claim` — claim runner job.
+- `POST /api/runner/heartbeat` — heartbeat.
+- `POST /api/runner/complete` — complete job.
+- `POST /api/editorial/publish` — publish draft.
+
+All endpoints require authentication and enforce ownership where applicable.
+
+## Installation and Local Development
+
+Requirements: Node.js 20+, npm, PostgreSQL optional, Kane CLI for verification.
+
 ```bash
 npm install
+cp .env.example .env.local
 npm run dev
 ```
-(Requires Node.js/npm. Database, GitHub, AI provider, and Kane verification must be configured before end-to-end agent features can work.)
 
-## Verification
-UI and browser verification for this project must use **Kane CLI** (not Playwright/Puppeteer/Selenium as a substitute for Kane verification). See `AGENTS.md` for required flags, evidence handling, and failure workflow.
+Run typecheck, lint, build:
 
-- `npm run kane:verify -- --url <real-url> --flow shell-nav [--headless]` — reusable local Kane CLI adapter (writes NDJSON/records under `data/verification/`).
-- `npm run kane:runner` — persistent Windows/local runner that connects to the deployed KAGURA coordinator, claims queued jobs, executes Kane CLI locally, and syncs genuine results back (never runs Kane on Vercel).
-
-## Windows runner (Stage 2)
-
-### Prerequisites
-1. **Node.js** and **npm** installed (project requires Node 20+; this repo has been used with Node 24 on Windows).
-2. **Kane CLI** installed and authenticated on this machine:
-   - Install/upgrade per Kane docs, then verify:
-     ```powershell
-     kane-cli --version
-     kane-cli whoami
-     ```
-3. **Google Chrome** installed (supported browser) and a dedicated writable Chrome profile available (proven profile path in this workspace): `data\verification\kane-chrome-profile`.
-4. Network access from this machine to the deployed KAGURA app URL you will test (if Vercel Deployment Protection is enabled, the runner must be able to reach the target; use an accessible URL/bypass/custom domain as configured).
-
-### Configure environment (local, gitignored)
-1. Copy the template and fill in real values (never commit secrets, never put the runner token in frontend/public vars):
-   ```powershell
-   Copy-Item .env.runner.example .env.runner
-   notepad .env.runner
-   ```
-2. Set at minimum:
-   - `KAGURA_APP_URL` = deployed KAGURA coordinator base URL (e.g. `https://<your-deployment>.vercel.app` or production domain)
-   - `KAGURA_RUNNER_TOKEN` = must match the server-side `KAGURA_RUNNER_TOKEN` configured in Vercel (runner auth is separate from dashboard user auth)
-   - `KANE_CLI_USER_AGENT=kilocode`
-3. Optional: `KAGURA_RUNNER_ID` (stable id; auto-generated/persisted to `data/verification/runner-id` if unset), `KAGURA_RUNNER_VERSION`, polling/heartbeat tuning.
-
-### Start the runner (PowerShell)
-```powershell
-Set-Location 'C:\Users\HP\AppData\Roaming\Kilo Desktop\chats\session-eMHkrI'
-npm run kane:runner
+```bash
+npm run typecheck
+npm run lint
+npm run build
 ```
-On successful startup/connect/auth you should see logs such as: `KAGURA RUNNER STARTED`, `Backend connected`, `Runner authenticated`, `Heartbeat successful`, then periodic `Checking for jobs...`.
 
-### Stop safely
-- Press `Ctrl+C` in the runner terminal (SIGINT). The runner stops claiming new jobs and, if a job is executing, finishes the current execution and attempts to sync its result before exiting.
-- Do not force-kill during result sync unless necessary; unsynced results are retained locally under `data\verification\pending-sync\` for recovery on next start.
+Run tests:
 
-### How it behaves
-- One active job at a time. Claims via `/api/runner/claim`, heartbeats via `/api/runner/heartbeat`, completes via `/api/runner/complete` (Bearer `KAGURA_RUNNER_TOKEN`). HTTP 204 = no jobs available.
-- Executes genuine `kane-cli run --agent ...` locally with headless Chrome and the dedicated profile; parses NDJSON `run_end` and syncs real outcomes/evidence refs. No simulated results.
-- Retries transient network/sync failures with backoff and retains failed sync payloads locally (never discarded).
+```bash
+npm run test
+npm run test:runner
+```
 
-### Server-side (Vercel) requirements
-- `DATABASE_URL` configured (durable jobs/records/heartbeat) and `KAGURA_RUNNER_TOKEN` set to the same secret used by the runner.
-- Vercel remains coordinator only (never executes Kane CLI).
+## Environment Variables
 
+See `.env.example`. Key variables:
 
-## License
-TBD
+- `DATABASE_URL` — optional PostgreSQL.
+- `GITHUB_TOKEN`, `GITHUB_REPO_OWNER`, `GITHUB_REPO_NAME` — GitHub observation.
+- `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` — GitHub OAuth.
+- `KAGURA_TOKEN_ENCRYPTION_KEY` — token encryption.
+- `KAGURA_APP_URL` — app URL for runner.
+- `KAGURA_RUNNER_TOKEN` — runner auth.
+- `KANE_CLI_USER_AGENT` — Kane user agent.
+- `AI_PROVIDER`, `AI_API_KEY`, `AI_MODEL` — optional AI.
 
-## Investigation storage limitations
-- Investigation storage uses KV/local filesystem. KV uses transactional row locking; local filesystem writes are atomic via temp+rename but cross-process concurrency is not globally locked.
-- Distributed atomic locking is not supported by this architecture.
+Never commit real secrets.
+
+## Implementation Status
+
+Implemented:
+- GitHub authentication and repository discovery.
+- Project creation and ownership.
+- Kane verification pipeline.
+- Investigation processing and recovery.
+- Verification result display.
+- Gemini server-side integration.
+- Drafts and report publication.
+
+In progress:
+- Full MVP page polish.
+- Runner external validation.
+
+Planned:
+- Dedicated Investigator UI.
+- Investigation overview and detail pages.
+- Publication of verified findings.
+
+## Future Direction
+
+KAGURA is intended to become a reliable verification and investigation layer that works alongside developers and their preferred AI coding agents.
+
+## Validation
+
+Validated with `npm run typecheck`, `npm run lint`, `npm run build`, and relevant tests. External blockers: GitHub test account, disposable database, Gemini credentials.
+
+## Preservation
+
+This README documents the current repository without modifying application code.
+```
+Write -Path README.md -Value $content
