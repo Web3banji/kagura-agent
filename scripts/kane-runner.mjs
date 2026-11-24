@@ -20,6 +20,7 @@ import {
   normalizeIsolationMode,
   probeIsolation,
   requiresIsolationForJob,
+  validateIsolationPaths,
 } from "./runner-isolation.mjs";
 import { workspaceDir, profileDir, isInside } from "./runner-workspace.mjs";
 import {
@@ -182,15 +183,32 @@ function getConfig() {
   };
 }
 
+let _sandboxPassword = undefined;
+function consumeSandboxPassword() {
+  if (_sandboxPassword !== undefined) return _sandboxPassword;
+  const v = process.env.KAGURA_RUNNER_SANDBOX_PASSWORD || "";
+  _sandboxPassword = v;
+  // Remove from runner process env after first read to reduce accidental exposure via child env dumps/logging.
+  // The operator must supply it via secure env injection; it cannot be recovered after clearing.
+  try { delete process.env.KAGURA_RUNNER_SANDBOX_PASSWORD; } catch {}
+  return _sandboxPassword;
+}
+
 function getIsolationConfig() {
   const mode = normalizeIsolationMode(process.env.KAGURA_RUNNER_ISOLATION || "auto");
+  const workspacesRoot = path.resolve(required("KAGURA_RUNNER_WORKSPACE_ROOT") || path.join(ROOT, "data", "verification", "workspaces"));
+  const profilesRoot = path.resolve(required("KAGURA_RUNNER_PROFILE_ROOT") || path.join(ROOT, "data", "verification", "profiles"));
+  const secretFiles = [".env.local", ".env.runner", ".env", ".env.development.local", ".env.production.local", ".env.test.local"]
+    .map((f) => path.join(ROOT, f))
+    .filter((f) => fsSyncExists(f));
   return {
     mode,
     sandboxUser: required("KAGURA_RUNNER_SANDBOX_USER") || undefined,
-    sandboxPassword: process.env.KAGURA_RUNNER_SANDBOX_PASSWORD || "",
-    workspacesRoot: path.join(ROOT, "data", "verification", "workspaces"),
-    profilesRoot: path.join(ROOT, "data", "verification", "profiles"),
+    get sandboxPassword() { return consumeSandboxPassword(); },
+    workspacesRoot,
+    profilesRoot,
     repoRoot: ROOT,
+    secretFiles,
     isolateAllJobs: process.env.KAGURA_RUNNER_ISOLATE_ALL_JOBS === "true",
   };
 }
@@ -198,7 +216,10 @@ function getIsolationConfig() {
 let isolationAssessment = null;
 async function assessIsolationOnce(config) {
   if (isolationAssessment) return isolationAssessment;
-  isolationAssessment = assessIsolation(config, await probeIsolation(config));
+  const requiredExecutables = [process.execPath];
+  const kaneEntry = resolveKaneCliEntry();
+  if (kaneEntry) requiredExecutables.push(kaneEntry);
+  isolationAssessment = assessIsolation(config, await probeIsolation({ ...config, requiredExecutables }));
   return isolationAssessment;
 }
 
@@ -345,26 +366,26 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
     log(`OS-level isolation active as "${assessment.sandboxUser}" for job ${job.id}`);
   }
 
-  // 2) Per-job isolation: a dedicated working directory and Kane/Chrome profile so that
-  // concurrent jobs from different users never share files, credentials, git state,
-  // or browser session data. The runner process itself is shared infrastructure; the
-  // per-job data is not. NOTE: this is a filesystem convention, NOT an OS security boundary.
-  const jobCwd = workspaceDir(ROOT, job);
-  const workspacesRoot = path.join(ROOT, "data", "verification", "workspaces");
+  // 2) Per-job isolation: dedicated working directory and Kane/Chrome profile.
+  // NOTE: filesystem separation is not an OS security boundary. OS boundary is enforced
+  // separately via sandbox account + ACLs when requiresIsolation is true.
+  const workspacesRoot = isolation.workspacesRoot || path.join(ROOT, "data", "verification", "workspaces");
+  const profilesRoot = isolation.profilesRoot || path.join(ROOT, "data", "verification", "profiles");
+  const pathValidation = validateIsolationPaths({ repoRoot: ROOT, workspacesRoot, profilesRoot });
+  if (!pathValidation.ok) {
+    return reject(`Refusing to execute: isolation path configuration invalid (${pathValidation.errors.join("; ")}).`);
+  }
+  const jobCwd = workspaceDir(ROOT, job, { workspacesRoot, profilesRoot });
   if (!isInside(workspacesRoot, jobCwd) || path.resolve(jobCwd) === path.resolve(ROOT)) {
     return reject("Refusing to execute: could not derive a safe isolated workspace for this job.");
   }
   await ensureDir(jobCwd);
 
-  // job.chromeProfile is never populated from user input today; if an operator pins one it
-  // must stay inside the profiles root, otherwise fall back to the per-job profile.
-  let profile = profileDir(ROOT, job);
+  let profile = profileDir(ROOT, job, { workspacesRoot, profilesRoot });
   if (typeof job.chromeProfile === "string" && job.chromeProfile.trim()) {
     const configured = path.resolve(ROOT, job.chromeProfile.trim());
-    const profilesRoot = path.join(ROOT, "data", "verification", "profiles");
     if (isInside(profilesRoot, configured)) profile = configured;
   }
-  const profilesRoot = path.join(ROOT, "data", "verification", "profiles");
   if (!isInside(profilesRoot, profile)) {
     await fs.rm(jobCwd, { recursive: true, force: true }).catch(() => {});
     return reject("Refusing to execute: could not derive a safe isolated Kane profile directory.");
@@ -425,14 +446,10 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
       // The sandbox password is never embedded in the command line. It is written to
       // a per-job file inside the workspace and ACL-locked so only the sandbox account
       // (and SYSTEM/Administrators) can read it; PowerShell reads it at spawn time.
-      const pwFile = path.join(jobCwd, "logs", `.sandbox-pw-${runId}.txt`);
-      await fs.writeFile(pwFile, isolation.sandboxPassword, "utf8").catch(() => {});
+      const pwFile = path.join(os.tmpdir(), `kagura-sandbox-pw-${runId}.txt`);
+      await fs.writeFile(pwFile, isolation.sandboxPassword, { encoding: "utf8", mode: 0o600 }).catch(() => {});
       try {
-        await spawn(
-          "icacls",
-          [pwFile, "/grant", `${assessment.sandboxUser}:(R)`, "/inheritance:r"],
-          { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] },
-        ).catch(() => {});
+        await spawn("icacls", [pwFile, "/inheritance:r", "/grant:r", `${assessment.sandboxUser}:(R)`, "/grant:r", "SYSTEM:(R)"], { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).catch(() => {});
       } catch {}
       spawnTarget = "powershell.exe";
       spawnArgs = buildSandboxSpawnCommand({
@@ -504,7 +521,7 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
   if (sandboxed) {
     try { finalStdout = await fs.readFile(sandboxOutFile, "utf8"); } catch {}
     try { finalStderr = await fs.readFile(sandboxErrFile, "utf8"); } catch {}
-    const pwFile = path.join(jobCwd, "logs", `.sandbox-pw-${runId}.txt`);
+    const pwFile = path.join(os.tmpdir(), `kagura-sandbox-pw-${runId}.txt`);
     await fs.rm(pwFile, { force: true }).catch(() => {});
   }
 

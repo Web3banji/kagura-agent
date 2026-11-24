@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "kane:verify": "node scripts/kane-verify.mjs",
     "kane:runner": "node scripts/kane-runner.mjs",
-    "test:runner": "node scripts/test-runner-workspace.mjs && node scripts/test-runner-security.mjs && npx tsx scripts/test-runner-adversarial.ts",
+    "test:runner": "node scripts/test-runner-workspace.mjs && node scripts/test-runner-security.mjs && npx tsx scripts/test-runner-adversarial.ts && npx tsx scripts/test-runner-isolation-gaps.mjs",
     "test:multiuser": "npx tsx scripts/test-multiuser-regression.ts",
     "test:repo-connections": "npx tsx scripts/test-repository-connections.ts",
     "test": "npm run test:runner && npm run test:multiuser",

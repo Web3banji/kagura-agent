@@ -327,9 +327,43 @@ export async function observeGitHub({ actorUserId }: { actorUserId?: string } = 
   }
 }
 
-export async function getObservationStatus() {
+export type ObservationOwnership = "system" | "user" | "project" | "unknown-legacy";
+
+export type SafeObservationStatus = {
+  /** Global observation is system-owned operational monitoring, not project/user private history. */
+  scope: "system";
+  ownership: "system";
+  repoConfigured: boolean;
+  tokenConfigured: boolean;
+  eventsCount: number;
+  /** Redacted for non-privileged principals. */
+  repo: string | null;
+  config: { configuredIn: "file" | "env" | "none" };
+  state: {
+    lastObservedAt?: string;
+    lastStatus?: "success" | "failed";
+    lastNewCount?: number;
+  };
+  note: string;
+};
+
+export async function getObservationStatus(opts?: { privileged?: boolean }): Promise<SafeObservationStatus> {
+  const [state, events] = await Promise.all([readObservationState(), opts?.privileged === true ? readObservedEvents({ privileged: true, system: true }) : Promise.resolve([])]);
   const cfg = await readGitHubConfig();
-  const state = await readObservationState();
-  const events = await readObservedEvents();
-  return { config: cfg, state, eventsCount: events.length, tokenConfigured: hasToken(), repo: repoSlug(cfg) };
+  const privileged = opts?.privileged === true;
+  return {
+    scope: "system",
+    ownership: "system",
+    repoConfigured: !!cfg.owner && !!cfg.repo,
+    tokenConfigured: hasToken(),
+    eventsCount: privileged ? (Array.isArray(events) ? events.length : 0) : 0,
+    repo: privileged && cfg.owner && cfg.repo ? `${cfg.owner}/${cfg.repo}` : null,
+    config: { configuredIn: cfg.owner && cfg.repo ? "file" : "none" },
+    state: {
+      lastObservedAt: state.lastObservedAt,
+      lastStatus: state.lastStatus,
+      lastNewCount: state.lastNewCount,
+    },
+    note: "Global GitHub observation is system-owned operational monitoring. Repository identifiers and raw errors are redacted for non-privileged principals. Legacy global events have unknown historical ownership and are not attributed to users/projects.",
+  };
 }

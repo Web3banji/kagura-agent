@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { isRunnerAuthorized, runnerUnauthorized } from "@/lib/auth/runner";
-import { claimNextJob, countPendingJobs, getJob, markRunnerSuccess, updateJob, getRunnerHeartbeat, recordHeartbeat } from "@/lib/verification/jobs";
-import { upsertVerificationRecord } from "@/lib/verification/store";
+import { claimNextJob, countPendingJobs, getJob, markRunnerSuccess, getRunnerHeartbeat, recordHeartbeat } from "@/lib/verification/jobs";
+import { completeJobAtomically } from "@/lib/verification/completion";
+import { AccessDeniedError } from "@/lib/auth/scope";
 import type { VerificationJobResult, VerificationOutcome, VerificationRecord } from "@/types/verification";
-import { processVerificationResult } from "@/lib/investigations/processor";
 
 export const dynamic = "force-dynamic";
 
@@ -82,16 +82,20 @@ async function handleComplete(req: Request) {
     }
     const job = await getJob(body.jobId.trim());
     if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
-    const statedRunnerId = typeof body.runnerId === "string" && body.runnerId ? body.runnerId : "";
-    const statedClaimedBy = typeof body.claimedBy === "string" && body.claimedBy ? body.claimedBy : "";
-    const caller = statedRunnerId || statedClaimedBy;
-    if (!job.claimedBy || !caller || job.claimedBy !== caller) {
+    const statedRunnerId = typeof body.runnerId === "string" ? body.runnerId.trim() : "";
+    if (!statedRunnerId) {
+      return NextResponse.json({ error: "runnerId is required" }, { status: 400 });
+    }
+    if (!job.claimedBy || job.claimedBy !== statedRunnerId) {
       return NextResponse.json({ error: "Job is not claimed by this runner" }, { status: 403 });
     }
-    if (statedRunnerId && job.claimedBy !== statedRunnerId) {
-      return NextResponse.json({ error: "Job is not claimed by this runner" }, { status: 403 });
+    if (job.leaseExpiresAt && new Date(job.leaseExpiresAt).getTime() < Date.now()) {
+      return NextResponse.json({ error: "Job claim lease has expired" }, { status: 409 });
     }
-    const owner = job.requestedBy || "";
+    const owner = job.requestedBy?.trim() || "";
+    if (!owner) {
+      return NextResponse.json({ error: "Job owner is missing; refusing to complete" }, { status: 409 });
+    }
     if (job.status !== "claimed" && job.status !== "running") {
       return NextResponse.json({ error: "Job is not in a completable state", status: job.status }, { status: 409 });
     }
@@ -116,7 +120,19 @@ async function handleComplete(req: Request) {
       startedAt,
       finishedAt,
     };
+    if (typeof body.projectId === "string" && body.projectId && job.projectId && body.projectId !== job.projectId) {
+      return NextResponse.json({ error: "Job project mismatch" }, { status: 403 });
+    }
+    if (typeof body.requestedBy === "string" && body.requestedBy && body.requestedBy !== owner) {
+      return NextResponse.json({ error: "Job owner mismatch" }, { status: 403 });
+    }
+    if (typeof body.ownerUserId === "string" && body.ownerUserId && body.ownerUserId !== owner) {
+      return NextResponse.json({ error: "Job owner mismatch" }, { status: 403 });
+    }
     const recordId = (typeof body.recordId === "string" && body.recordId) || job.recordId || job.id;
+    if (job.recordId && recordId !== job.recordId) {
+      return NextResponse.json({ error: "Job record mismatch" }, { status: 403 });
+    }
     const record: VerificationRecord = {
       id: recordId,
       flow: job.flow,
@@ -142,32 +158,59 @@ async function handleComplete(req: Request) {
       projectId: job.projectId,
       requestedBy: owner,
     };
-    await upsertVerificationRecord(record, { expectOwner: owner });
-    let investigationIds: string[] = [];
-    let investigationState: "pending" | "processing" | "processed" | "failed" = "processed";
-    if (outcome !== "pending" && outcome !== "running") {
-      const existingProcessing = record.investigationProcessing?.state;
-      if (existingProcessing === "processing" || existingProcessing === "processed") {
-        investigationIds = record.investigationIds ?? [];
-        investigationState = existingProcessing === "processed" ? "processed" : "processing";
-      } else {
-        await upsertVerificationRecord({ ...record, investigationProcessing: { state: "processing", processingStartedAt: new Date().toISOString() } }, { expectOwner: owner });
-        try {
-          const result = await processVerificationResult(record, { ownerUserId: owner || undefined, projectId: job.projectId || undefined, repositoryConnectionId: undefined });
-          investigationIds = result.investigations.map((i) => i.id);
-          await upsertVerificationRecord({ ...record, investigationIds, investigationProcessing: { state: "processed", processedAt: new Date().toISOString() } }, { expectOwner: owner });
-        } catch {
-          investigationState = "failed";
-          await upsertVerificationRecord({ ...record, investigationIds, investigationProcessing: { state: "failed", processingStartedAt: record.investigationProcessing?.processingStartedAt, processedAt: new Date().toISOString(), error: "Investigator processing failed; see recovery endpoint." } }, { expectOwner: owner });
-        }
-      }
+    const claimGeneration = job.claimGeneration ?? 0;
+    const freshBeforePersist = await getJob(job.id);
+    if (!freshBeforePersist || freshBeforePersist.claimedBy !== statedRunnerId || !["claimed", "running"].includes(freshBeforePersist.status)) {
+      return NextResponse.json({ error: "Job claim/status changed before persistence" }, { status: 409 });
+    }
+    if ((freshBeforePersist.claimGeneration ?? 0) !== claimGeneration) {
+      return NextResponse.json({ error: "Job claim generation changed before persistence" }, { status: 409 });
+    }
+    if (freshBeforePersist.leaseExpiresAt && new Date(freshBeforePersist.leaseExpiresAt).getTime() < Date.now()) {
+      return NextResponse.json({ error: "Job claim lease has expired" }, { status: 409 });
     }
     const jobStatus = terminalJobStatus(outcome);
-    const updated = await updateJob(job.id, { status: jobStatus, completedAt: finishedAt, recordId, result, error: jobStatus === "failed" || jobStatus === "did_not_start" ? (result.summary || result.failingStep || outcome) : undefined, leaseExpiresAt: undefined });
-    if (outcome === "passed") {
-      await markRunnerSuccess(finishedAt);
+    let completion;
+    try {
+      completion = await completeJobAtomically({
+        job: { ...job, claimGeneration },
+        runnerId: statedRunnerId,
+        record,
+        result,
+        outcome,
+        jobStatus,
+        finishedAt,
+      });
+    } catch (e) {
+      if (e instanceof AccessDeniedError) {
+        const msg = e.message || "Forbidden";
+        const conflict = /changed|mismatch|reservation|expired|generation/i.test(msg);
+        return NextResponse.json({ error: msg }, { status: conflict ? 409 : 403 });
+      }
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/not in a completable state|lease has expired|claim\/status changed|not found/i.test(msg)) {
+        return NextResponse.json({ error: msg }, { status: 409 });
+      }
+      throw e;
     }
-    return NextResponse.json({ ok: true, job: updated, record: { ...record, investigationIds, investigationProcessing: { state: investigationState, processedAt: new Date().toISOString() } }, investigationProcessed: outcome !== "pending" && outcome !== "running" });
+    const updated = completion.job;
+    const persisted = completion.record;
+    let investigationIds: string[] = persisted.investigationIds ?? [];
+    let investigationState: "pending" | "processing" | "processed" | "failed" = persisted.investigationProcessing?.state ?? (outcome !== "pending" && outcome !== "running" ? "pending" : "processed");
+    if (outcome !== "pending" && outcome !== "running") {
+      try {
+        const { drainVerificationProcessingOutbox } = await import("@/lib/verification/outbox-worker");
+        const drain = await drainVerificationProcessingOutbox({ jobId: job.id, claimGeneration: job.claimGeneration ?? 0, limit: 1, workerId: `runner-complete:${statedRunnerId}` });
+        investigationIds = drain.investigationIds ?? investigationIds;
+        investigationState = drain.state ?? investigationState;
+      } catch {
+        investigationState = persisted.investigationProcessing?.state ?? "pending";
+      }
+    }
+    if (outcome === "passed") {
+      try { await markRunnerSuccess(finishedAt); } catch { /* heartbeat persistence is best-effort; completion already persisted */ }
+    }
+    return NextResponse.json({ ok: true, job: updated, record: { ...persisted, investigationIds, investigationProcessing: { ...(persisted.investigationProcessing || {}), state: investigationState } }, investigationProcessed: investigationState === "processed" });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
   }
@@ -181,10 +224,27 @@ export async function GET(req: Request, ctx: { params: { path?: string[] } }) {
   return notFound();
 }
 
+async function handleProcessingDrain(req: Request) {
+  if (!isRunnerAuthorized(req)) return runnerUnauthorized();
+  try {
+    const body = await req.json().catch(() => ({}));
+    const workerId = typeof body.workerId === "string" && body.workerId.trim() ? body.workerId.trim() : undefined;
+    const jobId = typeof body.jobId === "string" && body.jobId.trim() ? body.jobId.trim() : undefined;
+    const claimGeneration = typeof body.claimGeneration === "number" && Number.isFinite(body.claimGeneration) ? body.claimGeneration : undefined;
+    const limit = typeof body.limit === "number" && Number.isFinite(body.limit) ? body.limit : 5;
+    const { drainVerificationProcessingOutbox } = await import("@/lib/verification/outbox-worker");
+    const result = await drainVerificationProcessingOutbox({ workerId, jobId, claimGeneration, limit });
+    return NextResponse.json({ ok: true, ...result });
+  } catch (err) {
+    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+  }
+}
+
 export async function POST(req: Request, ctx: { params: { path?: string[] } }) {
   const path = (ctx.params.path || []).join("/");
   if (path === "claim") return handleClaim(req);
   if (path === "complete") return handleComplete(req);
   if (path === "heartbeat") return handleHeartbeatPost(req);
+  if (path === "processing/drain") return handleProcessingDrain(req);
   return notFound();
 }

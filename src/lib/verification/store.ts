@@ -47,7 +47,7 @@ async function readLegacyDir(): Promise<VerificationRecord[]> {
   }
 }
 
-export async function readLegacyVerificationRecords(): Promise<VerificationRecord[]> {
+async function readLegacyVerificationRecordsInternal(): Promise<VerificationRecord[]> {
   const [a, b] = await Promise.all([readLegacyFile(), readLegacyDir()]);
   const byId = new Map<string, VerificationRecord>();
   for (const r of [...a, ...b]) byId.set(r.id, r);
@@ -106,10 +106,10 @@ export async function readVerificationRecords(opts?: { projectId?: string; reque
   let records: VerificationRecord[];
   if (hasDatabase()) {
     const primary = await readDbRecords(projectId);
-    const legacy = includeLegacy ? await readLegacyVerificationRecords() : [];
+    const legacy = includeLegacy ? await readLegacyVerificationRecordsInternal() : [];
     records = mergeUnique(primary, legacy);
   } else {
-    records = includeLegacy ? await readLegacyVerificationRecords() : await readFileRecords();
+    records = includeLegacy ? await readLegacyVerificationRecordsInternal() : await readFileRecords();
   }
   return records.filter((r) => matchesRecordScope(r, { projectId, requestedBy, includeLegacy }));
 }
@@ -134,7 +134,8 @@ function matchesRecordScope(
   return true;
 }
 
-export async function writeVerificationRecords(records: VerificationRecord[], projectId?: string): Promise<void> {
+/** @internal Test/migration-only raw overwrite. */
+export async function __unsafeWriteVerificationRecordsForTests(records: VerificationRecord[], projectId?: string): Promise<void> {
   if (hasDatabase()) {
     await writeDbRecords(records, projectId);
     return;
@@ -166,25 +167,54 @@ export async function appendVerificationRecord(record: VerificationRecord): Prom
  */
 export async function upsertVerificationRecord(
   record: VerificationRecord,
-  opts?: { expectOwner?: string },
+  opts?: { expectOwner?: string; expectedJobId?: string; expectedProjectId?: string | null; expectedRecordId?: string; allowReplay?: boolean },
 ): Promise<VerificationRecord> {
   const projectId = record.projectId;
   const expectOwner = typeof opts?.expectOwner === "string" && opts.expectOwner ? opts.expectOwner : undefined;
+  const expectedJobId = typeof opts?.expectedJobId === "string" && opts.expectedJobId ? opts.expectedJobId : undefined;
+  const expectedProjectId = typeof opts?.expectedProjectId === "string" && opts.expectedProjectId ? opts.expectedProjectId : opts?.expectedProjectId === null ? null : undefined;
+  const expectedRecordId = typeof opts?.expectedRecordId === "string" && opts.expectedRecordId ? opts.expectedRecordId : undefined;
+  const allowReplay = opts?.allowReplay === true;
+
+  const stableStringify = (v: unknown): string => JSON.stringify(v, Object.keys((v ?? {}) as object).sort());
+  const replayEquivalent = (existing: VerificationRecord, incoming: VerificationRecord): boolean => {
+    const a = { ...existing, investigationIds: existing.investigationIds ?? [], investigationProcessing: existing.investigationProcessing ?? undefined };
+    const b = { ...incoming, investigationIds: incoming.investigationIds ?? a.investigationIds, investigationProcessing: incoming.investigationProcessing ?? a.investigationProcessing, requestedBy: a.requestedBy, projectId: a.projectId, jobId: a.jobId, id: a.id };
+    return stableStringify(a) === stableStringify(b);
+  };
 
   const merge = (existing: VerificationRecord | undefined, incoming: VerificationRecord): VerificationRecord => {
+    if (expectedRecordId && incoming.id !== expectedRecordId) {
+      throw new AccessDeniedError("Verification record id does not match expected record");
+    }
+    if (expectedJobId && incoming.jobId && incoming.jobId !== expectedJobId) {
+      throw new AccessDeniedError("Verification record job does not match expected job");
+    }
+    if (expectedProjectId !== undefined && (incoming.projectId || null) !== (expectedProjectId || null)) {
+      throw new AccessDeniedError("Verification record project does not match expected project");
+    }
     if (existing) {
       const existingOwner = existing.requestedBy ?? undefined;
       if (expectOwner && existingOwner && existingOwner !== expectOwner) {
         throw new AccessDeniedError("Verification record is owned by another principal");
       }
-      // Never allow the owner to be changed by a completion payload.
+      if (expectedJobId && existing.jobId && existing.jobId !== expectedJobId) {
+        throw new AccessDeniedError("Verification record is bound to a different job");
+      }
+      if (expectedProjectId !== undefined && (existing.projectId || null) !== (expectedProjectId || null)) {
+        throw new AccessDeniedError("Verification record is bound to a different project");
+      }
+      if (allowReplay && replayEquivalent(existing, incoming)) {
+        return existing;
+      }
+      // Never allow the owner/project/job binding to be changed by a completion payload.
       const owner = expectOwner ?? existingOwner ?? incoming.requestedBy;
-      return { ...existing, ...incoming, requestedBy: owner };
+      return { ...existing, ...incoming, id: existing.id, jobId: existing.jobId ?? incoming.jobId, projectId: existing.projectId ?? incoming.projectId, requestedBy: owner };
     }
     if (expectOwner && incoming.requestedBy && incoming.requestedBy !== expectOwner) {
       throw new AccessDeniedError("Verification record owner does not match the claimed job");
     }
-    return { ...incoming, requestedBy: expectOwner ?? incoming.requestedBy };
+    return { ...incoming, requestedBy: expectOwner ?? incoming.requestedBy, jobId: expectedJobId ?? incoming.jobId, projectId: expectedProjectId !== undefined ? expectedProjectId ?? undefined : incoming.projectId };
   };
 
   if (hasDatabase()) {
@@ -203,19 +233,22 @@ export async function upsertVerificationRecord(
   return record;
 }
 
-export async function getVerificationRecord(id: string, opts?: { projectId?: string; requestedBy?: string }): Promise<VerificationRecord | undefined> {
-  const all = await readVerificationRecords({ projectId: opts?.projectId, requestedBy: opts?.requestedBy, includeLegacy: true });
+export async function getVerificationRecord(id: string, opts: { projectId?: string; requestedBy?: string; includeLegacy?: boolean }): Promise<VerificationRecord | undefined> {
+  const all = await readVerificationRecords({ projectId: opts.projectId, requestedBy: opts.requestedBy, includeLegacy: opts.includeLegacy === true });
   return all.find((r) => r.id === id || r.jobId === id);
 }
 
 export function summarizeOutcome(records: VerificationRecord[]): {
   latest: VerificationOutcome | "none";
+  total: number;
   passed: number;
   failed: number;
   blocked: number;
+  incomplete: number;
 } {
   const passed = records.filter((r) => r.outcome === "passed").length;
   const failed = records.filter((r) => r.outcome === "failed").length;
   const blocked = records.filter((r) => r.outcome === "blocked" || r.outcome === "did_not_start").length;
-  return { latest: records[0]?.outcome ?? "none", passed, failed, blocked };
+  const incomplete = records.filter((r) => r.outcome === "timeout" || r.outcome === "pending" || r.outcome === "running").length;
+  return { latest: (records[0]?.outcome ?? "none") as VerificationOutcome | "none", total: records.length, passed, failed, blocked, incomplete };
 }

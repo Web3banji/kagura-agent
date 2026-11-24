@@ -1,6 +1,7 @@
 import type { VerificationRecord } from "@/types/verification";
 import type { InvestigationCategory, Investigation, InvestigationVerificationReference } from "@/types/investigation";
 import { generateInvestigationOutputs } from "./explainer";
+import type { RecordScope } from "@/lib/auth/scope";
 
 export { generateInvestigationOutputs };
 
@@ -102,21 +103,50 @@ export function verificationToReference(record: VerificationRecord): Investigati
  * Returns the investigation(s) that were created, updated, or resolved,
  * or null if no investigation was affected.
  */
+export type ProcessVerificationContext = {
+  ownerUserId: string;
+  projectId?: string | null;
+  repositoryConnectionId?: string | null;
+};
+
+function normalizeOwner(v: string | null | undefined): string | null {
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+}
+
 export async function processVerificationResult(
   record: VerificationRecord,
-  opts?: { ownerUserId?: string; projectId?: string | null; repositoryConnectionId?: string | null },
+  opts: ProcessVerificationContext,
 ): Promise<{ investigations: Investigation[]; action: "created" | "updated" | "resolved" | "none" }> {
+  const ownerUserId = normalizeOwner(opts?.ownerUserId);
+  if (!ownerUserId) {
+    throw new Error("Trusted owner context is required for investigation processing.");
+  }
+  const recordOwner = normalizeOwner(record.requestedBy);
+  if (recordOwner && recordOwner !== ownerUserId) {
+    throw new Error("Verification record owner does not match trusted processing context.");
+  }
+  const trustedProjectId = normalizeOwner(opts.projectId ?? null);
+  const recordProjectId = normalizeOwner(record.projectId);
+  if (recordProjectId && trustedProjectId && recordProjectId !== trustedProjectId) {
+    throw new Error("Verification record project does not match trusted processing context.");
+  }
+  const projectId = trustedProjectId ?? recordProjectId;
+  if (recordProjectId && !projectId) {
+    throw new Error("Project ownership could not be established for verification processing.");
+  }
+
   // Import store dynamically to avoid circular dependency issues at module load.
   const { readInvestigations, createInvestigation, updateInvestigation, appendVerificationReference } = await import("./store");
 
-  const investigations = await readInvestigations();
+  const ownerScope: RecordScope = { userId: ownerUserId, privileged: false, includeLegacy: false };
+  const investigations = await readInvestigations(ownerScope);
 
   // --- Resolution path: passed verification can resolve an open investigation ---
   if (isResolutionEvidence(record)) {
     const matching = investigations.find((inv) => {
       if (inv.status !== "open") return false;
-      if (opts?.projectId && inv.projectId !== opts.projectId) return false;
-      if (opts?.ownerUserId && inv.ownerUserId !== opts.ownerUserId) return false;
+      if (projectId && inv.projectId !== projectId) return false;
+      if (inv.ownerUserId !== ownerUserId) return false;
       // Resolve only when evidence corresponds to this specific issue:
       // same failing step, or this exact verification ID is already referenced.
       return inv.verificationReferences.some(
@@ -133,7 +163,7 @@ export async function processVerificationResult(
           status: "resolved",
           rootCause: matching.rootCause || "Resolved by subsequent Kane verification with exit 0 (genuine run_end).",
         },
-        { userId: opts?.ownerUserId, includeLegacy: true, privileged: false } as never,
+        ownerScope,
       );
       if (updated) {
         return { investigations: [updated], action: "resolved" };
@@ -151,8 +181,8 @@ export async function processVerificationResult(
   const reference = verificationToReference(record);
   const matching = investigations.find((inv) => {
     if (inv.status === "resolved" || inv.status === "superseded") return false;
-    if (opts?.projectId && inv.projectId !== opts.projectId) return false;
-    if (opts?.ownerUserId && inv.ownerUserId !== opts.ownerUserId) return false;
+    if (projectId && inv.projectId !== projectId) return false;
+    if (inv.ownerUserId !== ownerUserId) return false;
     // Require identical failing step for matching. Summary or URL alone
     // are insufficient to merge distinct defects.
     return inv.verificationReferences.some(
@@ -162,11 +192,7 @@ export async function processVerificationResult(
 
   if (matching) {
     // Update existing investigation with new verification reference.
-    const updated = await appendVerificationReference(matching.id, reference, {
-      userId: opts?.ownerUserId,
-      includeLegacy: true,
-      privileged: false,
-    } as never);
+    const updated = await appendVerificationReference(matching.id, reference, ownerScope);
     if (updated) {
       // Refresh the fix prompt when new evidence changes the recommended action.
       const regenerated = await updateInvestigation(
@@ -174,7 +200,7 @@ export async function processVerificationResult(
         {
           aiFixPrompt: generateAIFixPrompt(updated, record),
         },
-        { userId: opts?.ownerUserId, includeLegacy: true, privileged: false },
+        ownerScope,
       );
       return { investigations: [regenerated || updated], action: "updated" };
     }
@@ -187,8 +213,8 @@ export async function processVerificationResult(
 
   const created = await createInvestigation(
     {
-      ownerUserId: opts?.ownerUserId ?? "",
-      projectId: opts?.projectId ?? null,
+      ownerUserId,
+      projectId: projectId ?? null,
       repositoryConnectionId: opts?.repositoryConnectionId ?? null,
       title: deriveTitle(record),
       category: deriveCategory(record),

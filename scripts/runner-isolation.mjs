@@ -63,6 +63,10 @@ export function assessIsolation(config, probe) {
     if (!config.sandboxUser) {
       return { ok: false, mode: "account", reason: "KAGURA_RUNNER_SANDBOX_USER is not set." };
     }
+    const pathCheck = validateIsolationPaths(config);
+    if (!pathCheck.ok) {
+      return { ok: false, mode: "account", reason: `Isolation path configuration invalid: ${pathCheck.errors.join("; ")}` };
+    }
     if (!probe.accountExists) {
       return {
         ok: false,
@@ -84,11 +88,26 @@ export function assessIsolation(config, probe) {
         reason: "ACLs are not correctly configured for the sandbox account.",
       };
     }
+    if (probe.secretAclOk !== true) {
+      return {
+        ok: false,
+        mode: "account",
+        reason: "Secret-file ACLs are not confirmed for the sandbox account (fail closed).",
+      };
+    }
+    if (probe.executableOk !== true) {
+      return {
+        ok: false,
+        mode: "account",
+        reason: "Required runner executable access is not confirmed for the sandbox account (fail closed).",
+      };
+    }
     return {
       ok: true,
       mode: "account",
       sandboxUser: config.sandboxUser,
-      reason: `OS-level isolation active as "${config.sandboxUser}".`,
+      reason: `OS-level isolation active as "${config.sandboxUser}" (host boundary; not per-job/user OS isolation).`,
+      limitations: ["single sandbox account provides host boundary, not per-job/user OS isolation"],
     };
   }
   return { ok: false, mode, reason: `Unknown isolation mode: ${mode}` };
@@ -98,13 +117,45 @@ export function assessIsolation(config, probe) {
 /* Planning (pure)                                                    */
 /* ------------------------------------------------------------------ */
 
-export function buildIsolationPlan(job, { workspace, profile, repoRoot }) {
+export function buildIsolationPlan(job, { workspace, profile, repoRoot, workspacesRoot, profilesRoot }) {
   return {
     workspace,
     profile,
+    workspacesRoot,
+    profilesRoot,
     grantWrite: [workspace, profile, path.join(workspace, "logs")],
-    denyRead: [repoRoot, path.join(repoRoot, ".env.local"), path.join(repoRoot, ".env.runner"), path.join(repoRoot, ".env")],
+    // Deny-read must be handled by host ACL setup outside accessible roots; do not rely on filename-only denies.
+    denyRead: [],
+    requiredReadable: [],
   };
+}
+
+export function buildAclBackupManifest({ backupDir, stamp, targets }) {
+  const items = (targets || []).map((target) => {
+    const resolved = path.resolve(target.path);
+    const name = String(target.name || path.basename(resolved) || "target").replace(/[^a-zA-Z0-9._-]+/g, "-");
+    return {
+      name,
+      path: resolved,
+      kind: target.kind || "path",
+      backupFile: path.join(backupDir, `acl-${stamp}-${name}.txt`),
+      restoreCommand: `icacls ${JSON.stringify(resolved)} /restore ${JSON.stringify(path.join(backupDir, `acl-${stamp}-${name}.txt`))}`,
+    };
+  });
+  return { version: 1, stamp, backupDir: path.resolve(backupDir), items };
+}
+
+export function validateIsolationPaths({ repoRoot, workspacesRoot, profilesRoot }) {
+  const repo = path.resolve(repoRoot);
+  const ws = path.resolve(workspacesRoot);
+  const pf = path.resolve(profilesRoot);
+  const errors = [];
+  if (!ws || !pf) errors.push("workspacesRoot and profilesRoot are required");
+  if (ws === repo || pf === repo) errors.push("workspace/profile roots must not equal repo root");
+  if (ws.startsWith(repo + path.sep) || pf.startsWith(repo + path.sep)) errors.push("workspace/profile roots must not be inside repo root");
+  if (repo.startsWith(ws + path.sep) || repo.startsWith(pf + path.sep)) errors.push("repo root must not be inside workspace/profile roots");
+  if (ws === pf) errors.push("workspacesRoot and profilesRoot must be different");
+  return { ok: errors.length === 0, errors, repoRoot: repo, workspacesRoot: ws, profilesRoot: pf };
 }
 
 /* ------------------------------------------------------------------ */
@@ -129,21 +180,28 @@ function defaultExec(command, args) {
  */
 export async function probeIsolation(config, exec = defaultExec) {
   if (config.mode !== "account" && config.mode !== "auto") {
-    return { accountExists: false, isAdmin: false, aclOk: false };
+    return { accountExists: false, isAdmin: false, aclOk: false, secretAclOk: false, executableOk: false };
   }
-  if (!config.sandboxUser) return { accountExists: false, isAdmin: false, aclOk: false };
+  if (!config.sandboxUser) return { accountExists: false, isAdmin: false, aclOk: false, secretAclOk: false, executableOk: false };
 
-  const [accountRes, groupRes, aclRes] = await Promise.all([
+  const secretFiles = Array.isArray(config.secretFiles) ? config.secretFiles.filter(Boolean) : [];
+  const requiredExecutables = Array.isArray(config.requiredExecutables) ? config.requiredExecutables.filter(Boolean) : [];
+  const [accountRes, groupRes, aclRes, secretAclRes, exeRes] = await Promise.all([
     exec("net", ["user", config.sandboxUser]),
     exec("net", ["localgroup", "Administrators", config.sandboxUser]),
     exec("icacls", [config.workspacesRoot, config.profilesRoot]),
+    secretFiles.length ? exec("icacls", secretFiles) : Promise.resolve({ code: 0, stdout: "ok" }),
+    requiredExecutables.length ? exec("icacls", requiredExecutables) : Promise.resolve({ code: 0, stdout: config.sandboxUser }),
   ]);
 
-  const accountExists = accountRes.code === 0 && accountRes.stdout.includes(config.sandboxUser);
-  const isAdmin = groupRes.code === 0 && /completed successfully/i.test(groupRes.stdout);
-  const aclOk = aclRes.code === 0 && aclRes.stdout.includes(config.sandboxUser);
-
-  return { accountExists, isAdmin, aclOk };
+  const accountExists = accountRes.code === 0 && String(accountRes.stdout).includes(config.sandboxUser);
+  const isAdmin = groupRes.code === 0 && /completed successfully/i.test(String(groupRes.stdout));
+  const aclOk = aclRes.code === 0 && String(aclRes.stdout).includes(config.sandboxUser);
+  // Secret ACL probe is heuristic only: true presence of deny ACE cannot be fully proven from icacls text alone here.
+  // Setup script must create backups/manifests and operator must verify; runner fail-closes when probe cannot confirm.
+  const secretAclOk = !secretFiles.length ? true : (secretAclRes.code === 0 && /den(y|ied)/i.test(String(secretAclRes.stdout)) ? true : false);
+  const executableOk = !requiredExecutables.length ? true : (exeRes.code === 0 && String(exeRes.stdout).toLowerCase().includes(String(config.sandboxUser).toLowerCase()));
+  return { accountExists, isAdmin, aclOk, secretAclOk, executableOk, probeLimitations: ["icacls text probes are heuristic; operator must verify ACLs and parent-directory permissions"] };
 }
 
 /* ------------------------------------------------------------------ */
@@ -186,4 +244,15 @@ export function buildSandboxSpawnCommand({
   ].join("; ");
 
   return ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", psScript];
+}
+
+
+export function buildAclRestoreCommands(manifest) {
+  const items = Array.isArray(manifest?.items) ? manifest.items : [];
+  return items.map((item) => ({
+    name: item.name,
+    path: item.path,
+    backupFile: item.backupFile,
+    command: ["icacls", String(item.path), "/restore", String(item.backupFile)],
+  }));
 }

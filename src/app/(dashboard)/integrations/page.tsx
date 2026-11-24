@@ -2,7 +2,8 @@ import Link from "next/link";
 import { PageHeader, Panel } from "@/components/ui/Primitives";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { getObservationStatus } from "@/lib/github/observe";
-import { getServerPrincipal } from "@/lib/auth/guards";
+import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
+import { scopeForPrincipal } from "@/lib/auth/scope";
 
 export const dynamic = "force-dynamic";
 
@@ -33,8 +34,9 @@ const INTEGRATIONS = [
 ];
 
 export default async function IntegrationsPage() {
-  await getServerPrincipal();
-  const obs = await getObservationStatus();
+  const principal = await getServerPrincipal();
+  const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
+  const obs = await getObservationStatus({ privileged: !!scope.privileged });
 
   return (
     <div className="space-y-6">
@@ -48,7 +50,7 @@ export default async function IntegrationsPage() {
           <div>
             <div className="text-sm font-medium text-fg">Connection</div>
             <div className="text-xs text-muted mt-0.5">
-              Watching <span className="font-medium break-all">{obs.repo || "not configured"}</span>
+              Watching <span className="font-medium break-all">{(obs.repo ?? 'Not configured') || "not configured"}</span>
             </div>
           </div>
           <div className="flex items-end gap-2">
@@ -65,8 +67,8 @@ export default async function IntegrationsPage() {
             ? "KAGURA can read updates from this GitHub repository using the configured token."
             : "Not connected — add GITHUB_TOKEN and GITHUB_REPO_OWNER/GITHUB_REPO_NAME in your server settings."}
         </p>
-        {obs.state.lastError ? (
-          <p className="text-xs text-rose-300 mt-1">Last issue: {obs.state.lastError}</p>
+        {obs.state.lastStatus === 'failed' ? (
+          <p className="text-xs text-rose-300 mt-1">Last global observation check failed. Details are redacted in global status.</p>
         ) : null}
       </Panel>
 

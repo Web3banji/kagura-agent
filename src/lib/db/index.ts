@@ -59,10 +59,36 @@ export async function ensureDb(): Promise<void> {
           claimed_by TEXT,
           runner_id TEXT,
           record_id TEXT,
-          error TEXT
+          error TEXT,
+          claim_generation INTEGER NOT NULL DEFAULT 0
         );
+        ALTER TABLE verification_jobs ADD COLUMN IF NOT EXISTS claim_generation INTEGER NOT NULL DEFAULT 0;
         CREATE INDEX IF NOT EXISTS verification_jobs_status_lease_idx ON verification_jobs (status, lease_expires_at);
         CREATE INDEX IF NOT EXISTS verification_jobs_project_created_idx ON verification_jobs (project_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS verification_processing_outbox (
+          id TEXT PRIMARY KEY,
+          job_id TEXT NOT NULL,
+          record_id TEXT NOT NULL,
+          owner_user_id TEXT NOT NULL,
+          project_id TEXT,
+          claim_generation INTEGER NOT NULL DEFAULT 0,
+          operation TEXT NOT NULL DEFAULT 'process_verification_result',
+          status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','processing','completed','failed','dead')),
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          max_attempts INTEGER NOT NULL DEFAULT 8,
+          last_error TEXT,
+          lease_owner TEXT,
+          lease_expires_at TIMESTAMPTZ,
+          available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          processed_at TIMESTAMPTZ
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS verification_processing_outbox_job_gen_op_idx
+          ON verification_processing_outbox (job_id, claim_generation, operation);
+        CREATE INDEX IF NOT EXISTS verification_processing_outbox_status_available_idx
+          ON verification_processing_outbox (status, available_at, lease_expires_at);
 
         -- Multi-user auth foundation (Milestone 1, additive)
         CREATE TABLE IF NOT EXISTS users (

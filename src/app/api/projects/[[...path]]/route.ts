@@ -28,8 +28,52 @@ async function handleBaseGet(req: Request) {
   }
   try {
     await ensureDb();
-    const res = await getPool().query("SELECT id, owner_user_id, name, slug, is_bootstrap, created_at, updated_at FROM projects WHERE owner_user_id = $1 ORDER BY created_at DESC", [user.id]);
-    return NextResponse.json({ projects: res.rows });
+    const res = await getPool().query(
+      `SELECT p.id, p.owner_user_id, p.name, p.slug, p.is_bootstrap, p.created_at, p.updated_at,
+              rc.id AS repository_connection_id,
+              rc.full_name AS repository_full_name,
+              rc.repo_owner,
+              rc.repo_name,
+              rc.is_private AS repository_is_private,
+              rc.default_branch AS repository_default_branch,
+              rc.status AS repository_status,
+              prl.link_status,
+              prl.created_at AS repository_linked_at
+       FROM projects p
+       LEFT JOIN project_repository_links prl
+         ON prl.project_id = p.id AND prl.owner_user_id = p.owner_user_id AND prl.link_status = 'active'
+       LEFT JOIN repository_connections rc
+         ON rc.id = prl.repository_connection_id AND rc.owner_user_id = p.owner_user_id
+       WHERE p.owner_user_id = $1
+       ORDER BY p.created_at DESC`,
+      [user.id],
+    );
+    const projects = res.rows.map((row) => {
+      const hasRepo = !!row.repository_full_name;
+      return {
+        id: row.id,
+        owner_user_id: row.owner_user_id,
+        name: row.name,
+        slug: row.slug,
+        is_bootstrap: row.is_bootstrap,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        repository: hasRepo
+          ? {
+              connectionId: row.repository_connection_id,
+              fullName: row.repository_full_name,
+              owner: row.repo_owner,
+              name: row.repo_name,
+              isPrivate: row.repository_is_private,
+              defaultBranch: row.repository_default_branch,
+              status: row.repository_status,
+              linkStatus: row.link_status,
+              linkedAt: row.repository_linked_at,
+            }
+          : null,
+      };
+    });
+    return NextResponse.json({ projects });
   } catch (err) {
     return apiErrorResponse(err);
   }

@@ -49,24 +49,25 @@ async function readFileEvents(): Promise<ObservedCommit[]> {
   return Array.isArray(v) ? v : [];
 }
 
+/**
+ * Global observation state is SYSTEM-OWNED operational metadata.
+ * It must not be treated as user/project-private history. Legacy records have unknown
+ * historical ownership and are preserved without fabricating owner attribution.
+ */
 export async function readObservationState(): Promise<ObservationState> {
   if (hasDatabase()) {
     const db = await kvGet<ObservationState>(STATE_KEY);
     if (db && typeof db === "object" && !Array.isArray(db)) return db;
-    // Import legacy local state if present (read-only) to preserve existing history.
     const legacy = await readLegacyJson<ObservationState>(STATE_FILE);
     if (legacy && typeof legacy === "object" && Object.keys(legacy).length > 0) {
       try {
         await kvSet(STATE_KEY, legacy);
-      } catch {
-        // Best-effort import; still return legacy without discarding it.
-      }
+      } catch {}
       return legacy;
     }
     return (db && typeof db === "object" ? (db as ObservationState) : {}) || {};
   }
   if (canReadLocalFiles()) return readFileState();
-  // Production without durable DB: no writable/expected local store.
   return {};
 }
 
@@ -84,18 +85,20 @@ export async function writeObservationState(state: ObservationState): Promise<vo
   await fs.writeFile(STATE_FILE, JSON.stringify(state, null, 2), "utf8");
 }
 
-export async function readObservedEvents(): Promise<ObservedCommit[]> {
+/**
+ * Global observed commit events are SYSTEM-OWNED legacy/system monitoring data.
+ * They may contain repository-specific information and MUST NOT be exposed to
+ * unrelated non-privileged principals. Historical records have unknown ownership;
+ * do not fabricate user/project attribution.
+ */
+async function readObservedEventsInternal(): Promise<ObservedCommit[]> {
   if (hasDatabase()) {
     const db = await kvGet<ObservedCommit[]>(EVENTS_KEY);
     if (Array.isArray(db)) return db;
     const legacy = await readLegacyJson<ObservedCommit[]>(EVENTS_FILE);
     if (Array.isArray(legacy)) {
       if (legacy.length > 0) {
-        try {
-          await kvSet(EVENTS_KEY, legacy);
-        } catch {
-          // Best-effort import; still return legacy without discarding it.
-        }
+        try { await kvSet(EVENTS_KEY, legacy); } catch {}
       }
       return legacy;
     }
@@ -105,7 +108,27 @@ export async function readObservedEvents(): Promise<ObservedCommit[]> {
   return [];
 }
 
-export async function writeObservedEvents(events: ObservedCommit[]): Promise<void> {
+/**
+ * SYSTEM-OWNED global observation events. These contain repository-specific data and
+ * historical ownership is unknown. Non-privileged principals must not receive raw events.
+ */
+export async function readObservedEvents(opts: { privileged: true; system: true }): Promise<ObservedCommit[]> {
+  if (opts?.privileged !== true || opts?.system !== true) {
+    throw new Error("Global observation events are system-owned and require privileged system access.");
+  }
+  return readObservedEventsInternal();
+}
+
+
+
+export async function writeObservedEvents(events: ObservedCommit[], opts: { privileged: true; system: true }): Promise<void> {
+  if (opts?.privileged !== true || opts?.system !== true) {
+    throw new Error("Global observation events are system-owned and require privileged system access.");
+  }
+  return writeObservedEventsInternal(events);
+}
+
+async function writeObservedEventsInternal(events: ObservedCommit[]): Promise<void> {
   if (hasDatabase()) {
     await kvSet(EVENTS_KEY, events);
     return;
@@ -122,7 +145,7 @@ export async function writeObservedEvents(events: ObservedCommit[]): Promise<voi
 export async function mergeObservedCommits(
   incoming: ObservedCommit[],
 ): Promise<{ merged: ObservedCommit[]; added: ObservedCommit[] }> {
-  const existing = await readObservedEvents();
+  const existing = await readObservedEventsInternal();
   const bySha = new Map(existing.map((c) => [c.sha, c]));
   const added: ObservedCommit[] = [];
   for (const c of incoming) {
@@ -136,13 +159,13 @@ export async function mergeObservedCommits(
     }
   }
   const merged = Array.from(bySha.values()).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  await writeObservedEvents(merged);
+  await writeObservedEventsInternal(merged);
   return { merged, added };
 }
 
 export async function markCommitsProcessed(shas: string[]): Promise<void> {
   if (!shas.length) return;
-  const events = await readObservedEvents();
+  const events = await readObservedEventsInternal();
   const set = new Set(shas);
   let changed = false;
   for (const e of events) {
@@ -151,11 +174,11 @@ export async function markCommitsProcessed(shas: string[]): Promise<void> {
       changed = true;
     }
   }
-  if (changed) await writeObservedEvents(events);
+  if (changed) await writeObservedEventsInternal(events);
 }
 
 export async function getUnprocessedCommits(limit = 10): Promise<ObservedCommit[]> {
-  const events = await readObservedEvents();
+  const events = await readObservedEventsInternal();
   return events.filter((e) => !e.processed).slice(0, limit);
 }
 

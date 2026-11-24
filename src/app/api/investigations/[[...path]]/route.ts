@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { getRequestPrincipal, unauthorizedResponse } from "@/lib/auth";
-import { principalHasLegacyAccess } from "@/lib/auth/guards";
+import { principalHasLegacyAccess, requireProjectAccess } from "@/lib/auth/guards";
 import { scopeForPrincipal } from "@/lib/auth/scope";
 import { readInvestigations } from "@/lib/investigations/store";
 import type { InvestigationCategory, InvestigationStatus } from "@/types/investigation";
@@ -8,6 +8,8 @@ import { getVerificationRecord, upsertVerificationRecord } from "@/lib/verificat
 import { processVerificationResult } from "@/lib/investigations/processor";
 import { getInvestigationById, updateInvestigation, appendVerificationReference } from "@/lib/investigations/store";
 import type { Investigation } from "@/types/investigation";
+import { getRepositoryConnectionForUser } from "@/lib/repositories/connections";
+import { resolveActiveRepositoryConnectionId } from "@/lib/repositories/connections";
 
 export const dynamic = "force-dynamic";
 
@@ -39,11 +41,21 @@ async function handleBasePost(req: Request) {
     if (!body.title || !body.technicalExplanation || !body.simpleExplanation) {
       return NextResponse.json({ error: "title, technicalExplanation, and simpleExplanation are required" }, { status: 400 });
     }
+    const projectId = typeof body.projectId === "string" ? body.projectId : null;
+    const repositoryConnectionId = typeof body.repositoryConnectionId === "string" ? body.repositoryConnectionId : null;
+    if (projectId && principal.userId) {
+      const ok = await requireProjectAccess(principal.userId, projectId);
+      if (!ok) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+    }
+    if (repositoryConnectionId && principal.userId) {
+      const conn = await getRepositoryConnectionForUser(repositoryConnectionId, principal.userId);
+      if (!conn) return NextResponse.json({ error: "Repository connection not found" }, { status: 404 });
+    }
     const { createInvestigation } = await import("@/lib/investigations/store");
     const investigation = await createInvestigation({
       ownerUserId: scope.userId ?? "",
-      projectId: (body.projectId as string) ?? null,
-      repositoryConnectionId: (body.repositoryConnectionId as string) ?? null,
+      projectId,
+      repositoryConnectionId,
       title: body.title as string,
       category: body.category as InvestigationCategory,
       technicalExplanation: body.technicalExplanation as string,
@@ -80,7 +92,7 @@ async function handleReprocess(req: Request) {
     if (!verificationId) {
       return NextResponse.json({ error: "verificationId or jobId is required" }, { status: 400 });
     }
-    const record = await getVerificationRecord(verificationId, { projectId: undefined, requestedBy });
+    const record = await getVerificationRecord(verificationId, { projectId: undefined, requestedBy, includeLegacy: !!scope.includeLegacy });
     if (!record) {
       return NextResponse.json({ error: "Verification record not found" }, { status: 404 });
     }
@@ -107,7 +119,15 @@ async function handleReprocess(req: Request) {
     await upsertVerificationRecord({ ...record, investigationProcessing: { state: "processing", processingStartedAt: isStaleProcessing ? new Date().toISOString() : processingStartedAt } }, { expectOwner: requestedBy });
     let result;
     try {
-      result = await processVerificationResult(record, { ownerUserId: principal.userId, projectId: record.projectId || undefined, repositoryConnectionId: undefined });
+      const trustedOwner = record.requestedBy?.trim();
+      if (!trustedOwner) {
+        return NextResponse.json({ ok: false, error: "Investigator recovery requires a verification record owner." }, { status: 403 });
+      }
+      if (!scope.privileged && trustedOwner !== principal.userId) {
+        return NextResponse.json({ ok: false, error: "Access denied" }, { status: 403 });
+      }
+      const repositoryConnectionId = await resolveActiveRepositoryConnectionId(record.projectId || null, trustedOwner);
+      result = await processVerificationResult(record, { ownerUserId: trustedOwner, projectId: record.projectId || undefined, repositoryConnectionId });
     } catch (err) {
       await upsertVerificationRecord({ ...record, investigationProcessing: { state: "failed", processedAt: new Date().toISOString(), error: err instanceof Error ? err.message : "Investigator recovery processing failed" } }, { expectOwner: requestedBy });
       return NextResponse.json({ ok: false, error: "Investigator recovery processing failed", message: err instanceof Error ? err.message : String(err) }, { status: 500 });
@@ -155,14 +175,22 @@ async function handleIdPost(req: Request, id: string) {
     if (!body.verificationId || !body.outcome || !body.detectedAt) {
       return NextResponse.json({ error: "verificationId, outcome, and detectedAt are required" }, { status: 400 });
     }
+    const investigation = await getInvestigationById(id, scope);
+    if (!investigation) return NextResponse.json({ error: "Investigation not found or access denied" }, { status: 404 });
+    const requestedBy = scope.privileged ? undefined : principal.userId;
+    const verification = await getVerificationRecord(String(body.verificationId), { requestedBy, includeLegacy: !!scope.includeLegacy });
+    if (!verification) return NextResponse.json({ error: "Verification record not found" }, { status: 404 });
+    if (investigation.projectId && verification.projectId && investigation.projectId !== verification.projectId) {
+      return NextResponse.json({ error: "Verification record does not belong to the investigation project" }, { status: 403 });
+    }
     const updated = await appendVerificationReference(id, {
-      verificationId: body.verificationId as string,
-      jobId: body.jobId as string | undefined,
-      outcome: body.outcome as string,
-      detectedAt: body.detectedAt as string,
-      evidencePath: body.evidencePath as string | undefined,
-      failingStep: body.failingStep as string | undefined,
-      summary: body.summary as string | undefined,
+      verificationId: String(body.verificationId),
+      jobId: typeof body.jobId === "string" ? body.jobId : undefined,
+      outcome: String(body.outcome),
+      detectedAt: String(body.detectedAt),
+      evidencePath: typeof body.evidencePath === "string" ? body.evidencePath : undefined,
+      failingStep: typeof body.failingStep === "string" ? body.failingStep : undefined,
+      summary: typeof body.summary === "string" ? body.summary : undefined,
     }, scope);
     if (!updated) return NextResponse.json({ error: "Investigation not found or access denied" }, { status: 404 });
     return NextResponse.json({ investigation: updated });

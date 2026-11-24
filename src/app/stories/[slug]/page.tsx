@@ -1,12 +1,14 @@
-import { getStoryBySlug } from "@/lib/stories/store";
+import { getPublishedStoryBySlug } from "@/lib/stories/store";
+import { toPublicStory } from "@/lib/stories/public";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
 export default async function StoryPage({ params }: { params: { slug: string } }) {
-  const story = await getStoryBySlug(params.slug);
-  if (!story || story.status !== "published") notFound();
+  const raw = await getPublishedStoryBySlug(params.slug);
+  const story = raw ? toPublicStory(raw) : null;
+  if (!story) notFound();
 
   const published = story.publishedAt
     ? new Date(story.publishedAt).toLocaleString()
@@ -41,7 +43,7 @@ export default async function StoryPage({ params }: { params: { slug: string } }
             <div className="text-fg/80 font-medium mb-1">Project updates included:</div>
             <ul className="list-disc pl-5 space-y-1 text-sm">
               {story.source.commits.map((c) => (
-                <li key={c.sha}>
+                <li key={`${c.message}-${c.date || ""}-${c.author || ""}`}>
                   {c.message}
                   <span className="text-xs text-muted">{c.date ? ` — ${new Date(c.date).toLocaleString()}` : ""}{c.author ? ` by ${c.author}` : ""}</span>
                 </li>
@@ -63,17 +65,15 @@ export default async function StoryPage({ params }: { params: { slug: string } }
           <div className="mt-2 text-xs text-muted space-y-1 break-all">
             {story.source.repo ? <div>Project: {story.source.repo}</div> : null}
             {story.source.observationSource ? <div>Update source: {story.source.observationSource === "github-api" ? "GitHub" : "Local project history"}</div> : null}
-            <div>Update IDs: {story.source.commits.map((c) => c.sha.slice(0, 7)).join(", ")}</div>
-            {story.source.changedFiles?.length ? <div>Files changed: {story.source.changedFiles.join(", ")}</div> : null}
+            <div>Updates included: {story.source.commits.length}</div>
             {story.verification ? (
               <>
-                <div>Test outcome: {story.verification.outcome} (code {story.verification.exitCode ?? "n/a"})</div>
+                <div>Test outcome: {story.verification.outcome}</div>
                 {typeof story.verification.durationMs === "number" ? <div>Duration: {(story.verification.durationMs / 1000).toFixed(1)}s</div> : null}
-                {story.verification.testUrl ? <div>Full test report: <a className="text-accent underline" href={story.verification.testUrl} target="_blank" rel="noreferrer">{story.verification.testUrl}</a></div> : null}
-                {story.verification.evidencePath ? <div>Evidence: {story.verification.evidencePath}</div> : null}
-                {story.verification.ndjsonPath ? <div>Run log: {story.verification.ndjsonPath}</div> : null}
+                {story.verification.flow ? <div>Verification flow: {story.verification.flow}</div> : null}
               </>
             ) : null}
+            <div className="text-muted/80">Internal evidence paths, NDJSON logs, and private identifiers are not exposed on public story pages.</div>
           </div>
         </details>
       </section>

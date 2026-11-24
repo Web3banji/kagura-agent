@@ -36,6 +36,7 @@ export interface VerificationRecord {
     processingStartedAt?: string;
     processedAt?: string;
     error?: string;
+    attemptCount?: number;
   };
   notes?: string;
   projectId?: string;
@@ -111,6 +112,7 @@ export interface VerificationJob {
   recordId?: string;
   error?: string;
   result?: VerificationJobResult;
+  claimGeneration?: number;
 }
 
 export interface RunnerHeartbeat {

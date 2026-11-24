@@ -86,9 +86,7 @@ async function runTests() {
       failingStep: 'Click "Activity history"',
     });
     const result = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: firstProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(result.action, "created");
     assert.ok(result.investigations[0]);
     assert.equal(result.investigations[0]!.ownerUserId, TEST_USER);
@@ -105,9 +103,7 @@ async function runTests() {
   await check("blocked verification does not create investigation", async () => {
     const record = makeVerificationRecord({ outcome: "blocked", failingStep: undefined, summary: undefined });
     const result = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: TEST_PROJECT,
-    });
+      ownerUserId: TEST_USER, projectId: TEST_PROJECT });
     assert.equal(result.action, "none");
     assert.equal(result.investigations.length, 0);
     assert.equal(isActionableVerification(record), false);
@@ -116,9 +112,7 @@ async function runTests() {
   await check("timed-out verification does not create investigation", async () => {
     const record = makeVerificationRecord({ outcome: "timeout", failingStep: undefined, summary: undefined });
     const result = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: TEST_PROJECT,
-    });
+      ownerUserId: TEST_USER, projectId: TEST_PROJECT });
     assert.equal(result.action, "none");
     assert.equal(result.investigations.length, 0);
   });
@@ -126,9 +120,7 @@ async function runTests() {
   await check("did_not_start verification does not create investigation", async () => {
     const record = makeVerificationRecord({ outcome: "did_not_start", failingStep: undefined, summary: undefined });
     const result = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: TEST_PROJECT,
-    });
+      ownerUserId: TEST_USER, projectId: TEST_PROJECT });
     assert.equal(result.action, "none");
     assert.equal(result.investigations.length, 0);
   });
@@ -141,9 +133,7 @@ async function runTests() {
       summary: "The Checks & tests page did not load.",
     });
     const result = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: TEST_PROJECT,
-    });
+      ownerUserId: TEST_USER, projectId: TEST_PROJECT });
     const inv = result.investigations[0]!;
     assert.ok(inv.technicalExplanation.includes("failed"));
     assert.ok(inv.technicalExplanation.includes("Checks & tests"));
@@ -161,9 +151,7 @@ async function runTests() {
       evidencePath: "data/verification/runs/xyz.ndjson",
     });
     const result = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: TEST_PROJECT,
-    });
+      ownerUserId: TEST_USER, projectId: TEST_PROJECT });
     const inv = result.investigations[0]!;
     assert.ok(inv.aiFixPrompt);
     assert.ok(inv.aiFixPrompt!.includes("Verify the page shows KAGURA"));
@@ -183,9 +171,7 @@ async function runTests() {
       summary: "Sidebar not found.",
     });
     const result1 = await processVerificationResult(record1, {
-      ownerUserId: TEST_USER,
-      projectId: repeatedProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(result1.action, "created");
 
     const record2 = makeVerificationRecord({
@@ -199,9 +185,7 @@ async function runTests() {
       finishedAt: new Date(Date.now() + 1000).toISOString(),
     });
     const result2 = await processVerificationResult(record2, {
-      ownerUserId: TEST_USER,
-      projectId: repeatedProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(result2.action, "updated");
     assert.equal(result2.investigations[0]!.verificationReferences.length, 2);
     assert.equal(result2.investigations[0]!.lastDetectedAt, record2.finishedAt);
@@ -222,9 +206,7 @@ async function runTests() {
       failingStep: "Check page title",
     });
     const created = await processVerificationResult(failed, {
-      ownerUserId: TEST_USER,
-      projectId: resolveProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(created.action, "created");
     assert.equal(created.investigations[0]!.status, "open");
 
@@ -242,9 +224,7 @@ async function runTests() {
       finishedAt: new Date(Date.now() + 2000).toISOString(),
     });
     const resolved = await processVerificationResult(passed, {
-      ownerUserId: TEST_USER,
-      projectId: resolveProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(resolved.action, "resolved");
     assert.equal(resolved.investigations[0]!.status, "resolved");
   });
@@ -257,9 +237,7 @@ async function runTests() {
       failingStep: "Check page title",
     });
     const created = await processVerificationResult(failed, {
-      ownerUserId: TEST_USER,
-      projectId: noExitProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(created.investigations[0]!.status, "open");
 
     const passedNoExit = makeVerificationRecord({
@@ -274,9 +252,7 @@ async function runTests() {
       finishedAt: new Date(Date.now() + 2000).toISOString(),
     });
     const result = await processVerificationResult(passedNoExit, {
-      ownerUserId: TEST_USER,
-      projectId: noExitProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     // A "passed" verification is not actionable for creating/updating investigations.
     // It does not produce an investigation update.
     assert.equal(result.action, "none");
@@ -287,9 +263,7 @@ async function runTests() {
   await check("user cannot see another user's investigations", async () => {
     const record = makeVerificationRecord({ outcome: "failed", failingStep: "Test step" });
     await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: TEST_PROJECT,
-    });
+      ownerUserId: TEST_USER, projectId: TEST_PROJECT });
 
     const others = await readInvestigations({
       userId: "other-user",
@@ -309,9 +283,7 @@ async function runTests() {
       failingStep: "Filter test step",
     });
     await processVerificationResult(record2, {
-      ownerUserId: TEST_USER,
-      projectId: filterProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
 
     const all = await readInvestigations({
       userId: TEST_USER,
@@ -327,9 +299,7 @@ async function runTests() {
   await check("get investigation by ID returns correct record", async () => {
     const record = makeVerificationRecord({ outcome: "failed", failingStep: "Retrieval test" });
     const created = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: TEST_PROJECT,
-    });
+      ownerUserId: TEST_USER, projectId: TEST_PROJECT });
     const fetched = await getInvestigationById(created.investigations[0]!.id, {
       userId: TEST_USER,
       includeLegacy: true,
@@ -362,9 +332,7 @@ async function runTests() {
   await check("update investigation changes fields", async () => {
     const record = makeVerificationRecord({ outcome: "failed", failingStep: "Update test" });
     const created = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: TEST_PROJECT,
-    });
+      ownerUserId: TEST_USER, projectId: TEST_PROJECT });
 
     const updated = await updateInvestigation(
       created.investigations[0]!.id,

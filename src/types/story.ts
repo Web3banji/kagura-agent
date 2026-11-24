@@ -16,6 +16,7 @@ export interface Story {
   body: string;
   status: StoryStatus;
   userId?: string | null;
+  projectId?: string | null;
   createdAt: string;
   updatedAt: string;
   publishedAt?: string;

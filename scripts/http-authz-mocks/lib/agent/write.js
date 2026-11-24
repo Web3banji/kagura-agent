@@ -1,0 +1,1 @@
+﻿exports.generateDraft = async (_o,_f,_v,ctx) => ({id:'new',slug:'gen',title:'Gen',subtitle:'Sub',body:'Body',status:'draft',source:{repo:'r/a',observationSource:'none',commits:[],changedFiles:[],observationSummary:'sum'},tags:['development'],createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),userId:ctx?.userId,projectId:ctx?.projectId});

@@ -226,8 +226,8 @@ check("isolation mode normalization", () => {
 
 check("assessment fails closed when the sandbox account is missing", () => {
   const result = assessIsolation(
-    { mode: "account", sandboxUser: "DOES_NOT_EXIST", workspacesRoot: "x", profilesRoot: "x", repoRoot: "x", isolateAllJobs: false },
-    { accountExists: false, isAdmin: false, aclOk: false },
+    { mode: "account", sandboxUser: "DOES_NOT_EXIST", workspacesRoot: "C:\\KaguraRunner\\workspaces", profilesRoot: "C:\\KaguraRunner\\profiles", repoRoot: "C:\\repo", isolateAllJobs: false },
+    { accountExists: false, isAdmin: false, aclOk: false, secretAclOk: false, executableOk: false },
   );
   assert.equal(result.ok, false);
   assert.equal(result.mode, "account");
@@ -235,16 +235,16 @@ check("assessment fails closed when the sandbox account is missing", () => {
 
 check("assessment fails closed when the sandbox account is an administrator", () => {
   const result = assessIsolation(
-    { mode: "account", sandboxUser: "ADMIN_ACCOUNT", workspacesRoot: "x", profilesRoot: "x", repoRoot: "x", isolateAllJobs: false },
-    { accountExists: true, isAdmin: true, aclOk: true },
+    { mode: "account", sandboxUser: "ADMIN_ACCOUNT", workspacesRoot: "C:\\KaguraRunner\\workspaces", profilesRoot: "C:\\KaguraRunner\\profiles", repoRoot: "C:\\repo", isolateAllJobs: false },
+    { accountExists: true, isAdmin: true, aclOk: true, secretAclOk: true, executableOk: true },
   );
   assert.equal(result.ok, false);
 });
 
 check("assessment passes only for a non-admin account with ACLs", () => {
   const result = assessIsolation(
-    { mode: "account", sandboxUser: "KAGURA_SANDBOX", workspacesRoot: "x", profilesRoot: "x", repoRoot: "x", isolateAllJobs: false },
-    { accountExists: true, isAdmin: false, aclOk: true },
+    { mode: "account", sandboxUser: "KAGURA_SANDBOX", workspacesRoot: "C:\\KaguraRunner\\workspaces", profilesRoot: "C:\\KaguraRunner\\profiles", repoRoot: "C:\\repo", isolateAllJobs: false },
+    { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: true, executableOk: true },
   );
   assert.equal(result.ok, true);
   assert.equal(result.sandboxUser, "KAGURA_SANDBOX");

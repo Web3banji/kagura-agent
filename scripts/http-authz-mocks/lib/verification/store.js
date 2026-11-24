@@ -1,0 +1,3 @@
+﻿exports.readVerificationRecords = async () => [];
+exports.getVerificationRecord = async (id, opts={}) => { const recs = globalThis.__testVerificationRecords; const r = recs.get(id); if(!r) return undefined; if(opts.requestedBy && r.requestedBy !== opts.requestedBy) { if(opts.includeLegacy && r.requestedBy==null) return structuredClone(r); return undefined; } return structuredClone(r); };
+exports.upsertVerificationRecord = async (record, opts={}) => { const recs = globalThis.__testVerificationRecords; const existing = recs.get(record.id); if (opts?.expectOwner && existing && existing.requestedBy && existing.requestedBy !== opts.expectOwner) throw new Error('owner mismatch'); recs.set(record.id, structuredClone(record)); return structuredClone(record); };

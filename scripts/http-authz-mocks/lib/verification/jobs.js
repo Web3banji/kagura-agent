@@ -1,0 +1,1 @@
+﻿exports.claimNextJob=async()=>null; exports.countPendingJobs=async()=>0; exports.getJob=async()=>null; exports.markRunnerSuccess=async()=>undefined; exports.getRunnerHeartbeat=async()=>({}); exports.recordHeartbeat=async()=>({});

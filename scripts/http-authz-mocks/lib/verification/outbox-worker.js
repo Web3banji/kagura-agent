@@ -1,0 +1,1 @@
+﻿exports.drainVerificationProcessingOutbox = async (opts={}) => { const fn = globalThis.__testDrainOutbox; if (fn) return fn(opts); return { drained:0, processed:0, failed:0, retried:0, skipped:0, investigationIds:[], state:'processed' }; };

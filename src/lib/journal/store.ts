@@ -39,7 +39,12 @@ async function seedEventsIfNeeded(): Promise<void> {
   }
 }
 
-export async function readJournalEvents(): Promise<JournalEvent[]> {
+/**
+ * Journal events are system-owned operational activity records (legacy global data).
+ * Raw access must be privileged; non-privileged principals get an empty set.
+ */
+export async function readJournalEvents(opts?: { privileged?: boolean }): Promise<JournalEvent[]> {
+  if (!opts?.privileged) return [];
   if (hasDatabase()) {
     const existing = await kvGet<JournalEvent[]>(EVENTS_KEY);
     if (Array.isArray(existing)) return existing;

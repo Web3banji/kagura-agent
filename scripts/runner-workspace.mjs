@@ -45,14 +45,30 @@ export function jobKey(job) {
   return `${identity}--${shortHash(`${job?.projectId ?? ""}|${job?.requestedBy ?? ""}|${job?.id ?? ""}`)}`;
 }
 
+export const DEFAULT_WORKSPACES_SUBDIR = path.join("data", "verification", "workspaces");
+export const DEFAULT_PROFILES_SUBDIR = path.join("data", "verification", "profiles");
+
+export function canonicalRoots(rootDir, opts = {}) {
+  const repoRoot = path.resolve(rootDir);
+  const workspacesRoot = opts.workspacesRoot
+    ? path.resolve(opts.workspacesRoot)
+    : path.join(repoRoot, DEFAULT_WORKSPACES_SUBDIR);
+  const profilesRoot = opts.profilesRoot
+    ? path.resolve(opts.profilesRoot)
+    : path.join(repoRoot, DEFAULT_PROFILES_SUBDIR);
+  return { repoRoot, workspacesRoot, profilesRoot };
+}
+
 /** Per-job isolated working directory (used as the child process cwd). */
-export function workspaceDir(rootDir, job) {
-  return path.join(rootDir, "data", "verification", "workspaces", jobKey(job));
+export function workspaceDir(rootDir, job, opts = {}) {
+  const { workspacesRoot } = canonicalRoots(rootDir, opts);
+  return path.join(workspacesRoot, jobKey(job));
 }
 
 /** Per-job isolated Kane/Chrome profile directory (never shared between jobs). */
-export function profileDir(rootDir, job) {
-  return path.join(rootDir, "data", "verification", "profiles", jobKey(job));
+export function profileDir(rootDir, job, opts = {}) {
+  const { profilesRoot } = canonicalRoots(rootDir, opts);
+  return path.join(profilesRoot, jobKey(job));
 }
 
 /** Shared output directory for NDJSON run logs (filenames are per-run UUIDs). */

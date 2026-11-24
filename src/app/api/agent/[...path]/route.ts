@@ -71,7 +71,7 @@ async function handleStatus(req: Request) {
   if (!scope.includeLegacy && !scope.userId) {
     return NextResponse.json({ state: { agentState: "idle", stage: "OBSERVE", note: "No legacy workspace data is available for this account." }, runs: [], observation: { config: { owner: "", repo: "", configuredIn: "default" }, state: {}, eventsCount: 0, tokenConfigured: false, repo: "" } });
   }
-  const [state, runs, obs] = await Promise.all([getCurrentPipelineState(), readRuns(scope), getObservationStatus()]);
+  const [state, runs, obs] = await Promise.all([getCurrentPipelineState(), readRuns(scope), getObservationStatus({ privileged: !!scope.privileged })]);
   return NextResponse.json({ state, runs: runs.slice(0, 10), observation: obs });
 }
 

@@ -258,6 +258,36 @@ export async function listRepositoryLinksForProject(
   return res.rows.map((r) => mapLink(r as Record<string, unknown>));
 }
 
+/**
+ * Resolve the single active repository connection for a project, ownership-scoped.
+ * Returns null when there is no project/DB context or no active link.
+ * Fails closed (throws) on ambiguous active-link state to avoid cross-project attribution.
+ */
+export async function resolveActiveRepositoryConnectionId(
+  projectId: string | null | undefined,
+  ownerUserId: string | null | undefined,
+): Promise<string | null> {
+  const pid = typeof projectId === "string" ? projectId.trim() : "";
+  const uid = typeof ownerUserId === "string" ? ownerUserId.trim() : "";
+  if (!pid || !uid) return null;
+  if (!hasDatabase()) return null;
+  await ensureDb();
+  const res = await getPool().query(
+    `SELECT repository_connection_id, link_status
+     FROM project_repository_links
+     WHERE project_id = $1 AND owner_user_id = $2 AND link_status = 'active'
+     ORDER BY created_at DESC
+     LIMIT 2`,
+    [pid, uid],
+  );
+  if (res.rowCount === 0) return null;
+  if ((res.rowCount ?? 0) > 1) {
+    throw new Error("Ambiguous active repository link state for project");
+  }
+  const id = res.rows[0]?.repository_connection_id;
+  return typeof id === "string" && id.trim() ? id : null;
+}
+
 export async function listProjectsForRepositoryConnection(
   repositoryConnectionId: string,
   ownerUserId: string,

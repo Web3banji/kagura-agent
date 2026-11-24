@@ -1,0 +1,2 @@
+﻿exports.isRunnerAuthorized = (req) => { const token = process.env.KAGURA_RUNNER_TOKEN || ''; if (!token) return false; const h = req.headers.get('x-runner-token') || req.headers.get('authorization')?.replace(/^Bearer\s+/i,'') || ''; return h === token; };
+exports.runnerUnauthorized = () => new Response(JSON.stringify({error:'Unauthorized runner'}), {status:401, headers:{'Content-Type':'application/json'}});

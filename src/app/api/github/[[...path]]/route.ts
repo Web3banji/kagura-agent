@@ -13,6 +13,10 @@ export const dynamic = "force-dynamic";
 async function handleConfigGet(req: Request) {
   const principal = await getRequestPrincipal(req);
   if (!principal.authorized) return unauthorizedResponse(principal.reason || "Unauthorized");
+  const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
+  if (!scope.privileged && !scope.userId && !scope.includeLegacy) {
+    return NextResponse.json({ error: "Configuration is not available for this account." }, { status: 403 });
+  }
   return NextResponse.json(await readGitHubConfig());
 }
 
@@ -41,8 +45,12 @@ async function handleConfigPost(req: Request) {
 async function handleObserveGet(req: Request) {
   const principal = await getRequestPrincipal(req);
   if (!principal.authorized) return unauthorizedResponse(principal.reason || "Unauthorized");
+  const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
+  if (!scope.privileged && !scope.userId && !scope.includeLegacy) {
+    return NextResponse.json({ error: "Observation status is not available for this account." }, { status: 403 });
+  }
   const { getObservationStatus } = await import("@/lib/github/observe");
-  return NextResponse.json(await getObservationStatus());
+  return NextResponse.json(await getObservationStatus({ privileged: !!scope.privileged }));
 }
 
 async function handleObservePost(req: Request) {

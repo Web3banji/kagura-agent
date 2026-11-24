@@ -42,35 +42,30 @@ async function seedInvestigationsIfNeeded(): Promise<void> {
   }
 }
 
-export async function readInvestigations(scope?: RecordScope): Promise<Investigation[]> {
+async function readAllInvestigations(): Promise<Investigation[]> {
   if (hasDatabase()) {
     const existing = await kvGet<Investigation[]>(INVESTIGATIONS_KEY);
-    const all = Array.isArray(existing) ? existing : await (async () => {
-      const legacy = await readLegacyInvestigationsFile();
-      if (Array.isArray(legacy)) {
-        if (legacy.length > 0) {
-          try {
-            await kvMutate<Investigation[]>(INVESTIGATIONS_KEY, (cur) => (Array.isArray(cur) && cur.length > 0 ? cur : legacy));
-          } catch {}
-        }
-        return legacy;
+    if (Array.isArray(existing)) return existing;
+    const legacy = await readLegacyInvestigationsFile();
+    if (Array.isArray(legacy)) {
+      if (legacy.length > 0) {
+        try { await kvMutate<Investigation[]>(INVESTIGATIONS_KEY, (cur) => (Array.isArray(cur) && cur.length > 0 ? cur : legacy)); } catch {}
       }
-      return [];
-    })();
-    return scope ? filterVisibleByOwner(all, scope) : all;
+      return legacy;
+    }
+    return [];
   }
-  if (!canUseLocalFs()) {
-    throw new Error("Durable investigation storage is not configured (DATABASE_URL missing in production).");
-  }
+  if (!canUseLocalFs()) throw new Error("Durable investigation storage is not configured (DATABASE_URL missing in production).");
   await ensureLocal();
   try {
     const raw = await fs.readFile(FILE, "utf8");
     const parsed = JSON.parse(raw) as Investigation[];
-    const all = Array.isArray(parsed) ? parsed : [];
-    return scope ? filterVisibleByOwner(all, scope) : all;
-  } catch {
-    return [];
-  }
+    return Array.isArray(parsed) ? parsed : [];
+  } catch { return []; }
+}
+
+export async function readInvestigations(scope: RecordScope): Promise<Investigation[]> {
+  return filterVisibleByOwner(await readAllInvestigations(), scope);
 }
 
 function filterVisibleByOwner(items: Investigation[], scope: RecordScope): Investigation[] {
@@ -82,7 +77,8 @@ function filterVisibleByOwner(items: Investigation[], scope: RecordScope): Inves
   });
 }
 
-export async function writeInvestigations(investigations: Investigation[]): Promise<void> {
+/** @internal Test/migration-only raw overwrite. Never use from production request paths. */
+export async function __unsafeWriteInvestigationsForTests(investigations: Investigation[]): Promise<void> {
   if (hasDatabase()) {
     await seedInvestigationsIfNeeded();
     await kvMutate<Investigation[]>(INVESTIGATIONS_KEY, () => investigations);
@@ -97,7 +93,7 @@ export async function writeInvestigations(investigations: Investigation[]): Prom
   await fs.rename(tmp, FILE);
 }
 
-export async function getInvestigationById(id: string, scope?: RecordScope): Promise<Investigation | undefined> {
+export async function getInvestigationById(id: string, scope: RecordScope): Promise<Investigation | undefined> {
   return (await readInvestigations(scope)).find((i) => i.id === id);
 }
 
@@ -137,17 +133,17 @@ export async function createInvestigation(input: CreateInvestigationInput): Prom
     return investigation;
   }
 
-  const investigations = await readInvestigations();
+  const investigations = await readAllInvestigations();
   investigations.unshift(investigation);
-  await writeInvestigations(investigations);
+  await __unsafeWriteInvestigationsForTests(investigations);
   return investigation;
 }
 
-export async function updateInvestigation(id: string, patch: UpdateInvestigationInput, scope?: RecordScope): Promise<Investigation | undefined> {
+export async function updateInvestigation(id: string, patch: UpdateInvestigationInput, scope: RecordScope): Promise<Investigation | undefined> {
   const apply = (investigations: Investigation[]): { next: Investigation[]; updated?: Investigation } => {
     const idx = investigations.findIndex((i) => i.id === id);
     if (idx < 0) return { next: investigations };
-    if (scope && !canAccessOwnedRecord(investigations[idx].ownerUserId, scope)) {
+    if (!canAccessOwnedRecord(investigations[idx].ownerUserId, scope)) {
       return { next: investigations };
     }
     const updated: Investigation = {
@@ -155,9 +151,11 @@ export async function updateInvestigation(id: string, patch: UpdateInvestigation
       ...patch,
       updatedAt: new Date().toISOString(),
     };
-    // Non-privileged principals cannot change the owner.
-    if (!scope || !scope.privileged) {
+    // Non-privileged principals cannot change owner/project binding.
+    if (!scope.privileged) {
       updated.ownerUserId = investigations[idx].ownerUserId;
+      updated.projectId = investigations[idx].projectId;
+      updated.repositoryConnectionId = investigations[idx].repositoryConnectionId;
     }
     const next = [...investigations];
     next[idx] = updated;
@@ -176,22 +174,22 @@ export async function updateInvestigation(id: string, patch: UpdateInvestigation
     return updated;
   }
 
-  const investigations = await readInvestigations();
+  const investigations = await readAllInvestigations();
   const res = apply(investigations);
   if (!res.updated) return undefined;
-  await writeInvestigations(res.next);
+  await __unsafeWriteInvestigationsForTests(res.next);
   return res.updated;
 }
 
 export async function appendVerificationReference(
   id: string,
   reference: { verificationId: string; jobId?: string; outcome: string; detectedAt: string; evidencePath?: string; failingStep?: string; summary?: string },
-  scope?: RecordScope,
+  scope: RecordScope,
 ): Promise<Investigation | undefined> {
   const apply = (investigations: Investigation[]): { next: Investigation[]; updated?: Investigation } => {
     const idx = investigations.findIndex((i) => i.id === id);
     if (idx < 0) return { next: investigations };
-    if (scope && !canAccessOwnedRecord(investigations[idx].ownerUserId, scope)) {
+    if (!canAccessOwnedRecord(investigations[idx].ownerUserId, scope)) {
       return { next: investigations };
     }
     const existing = investigations[idx];
@@ -206,7 +204,7 @@ export async function appendVerificationReference(
       lastDetectedAt: reference.detectedAt,
       updatedAt: new Date().toISOString(),
     };
-    if (!scope || !scope.privileged) {
+    if (!scope.privileged) {
       updated.ownerUserId = existing.ownerUserId;
     }
     const next = [...investigations];
@@ -226,10 +224,10 @@ export async function appendVerificationReference(
     return updated;
   }
 
-  const investigations = await readInvestigations();
+  const investigations = await readAllInvestigations();
   const res = apply(investigations);
   if (!res.updated) return undefined;
-  await writeInvestigations(res.next);
+  await __unsafeWriteInvestigationsForTests(res.next);
   return res.updated;
 }
 

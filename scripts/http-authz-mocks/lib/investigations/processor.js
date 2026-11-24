@@ -1,0 +1,1 @@
+﻿exports.processVerificationResult = async (record, opts={}) => { const fn = globalThis.__testProcessVerificationResult; if (fn) return fn(record, opts); return { action:'skipped', investigations:[] }; };

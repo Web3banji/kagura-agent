@@ -1,21 +1,25 @@
+import Link from "next/link";
 import { PageHeader, Panel } from "@/components/ui/Primitives";
-import { StatusBadge } from "@/components/ui/StatusBadge";
 import { getObservationStatus } from "@/lib/github/observe";
 import { aiConfigured } from "@/lib/ai/provider";
 import { readVerificationRecords } from "@/lib/verification/store";
 import { countPendingJobs, getRunnerHeartbeat } from "@/lib/verification/jobs";
 import { getRunnerToken } from "@/lib/auth/runner";
 import { resolveProjectId } from "@/lib/verification/context";
+import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
+import { scopeForPrincipal } from "@/lib/auth/scope";
+import { hasDatabase } from "@/lib/db";
 import { GitHubConfigForm } from "./github-config-form";
 import { ObserveAction } from "./observe-action";
-import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
+type ServiceState = "Configured" | "Not configured" | "Recently active" | "Processing" | "Waiting for heartbeat" | "Needs attention" | "Unavailable" | "Blocked" | "Not tested";
+
 function ageLabel(iso?: string): string {
-  if (!iso) return "never";
+  if (!iso) return "Never";
   const ms = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(ms)) return "unknown";
+  if (Number.isNaN(ms)) return "Unknown";
   const s = Math.floor(ms / 1000);
   if (s < 60) return `${s}s ago`;
   const m = Math.floor(s / 60);
@@ -25,120 +29,198 @@ function ageLabel(iso?: string): string {
   return `${Math.floor(h / 24)}d ago`;
 }
 
-export default async function SettingsPage() {
-  const projectId = await resolveProjectId();
-  const [obs, ai, heartbeat, pendingJobs, verifications] = await Promise.all([
-    getObservationStatus(),
-    Promise.resolve(aiConfigured()),
-    getRunnerHeartbeat(),
-    countPendingJobs(projectId),
-    readVerificationRecords({ projectId, includeLegacy: true }),
-  ]);
-  const latestVer = verifications[0];
-  const lastSuccessful = verifications.find((r) => r.outcome === "passed");
-  const appUrl = process.env.KAGURA_APP_URL || process.env.ECHOLOG_APP_URL || "http://localhost:3000";
-  const runnerConfigured = !!getRunnerToken();
-  const runnerConnected = runnerConfigured && heartbeat.status === "connected";
+function stateTone(state: ServiceState): string {
+  switch (state) {
+    case "Recently active": return "border-emerald-500/25 bg-emerald-500/10 text-emerald-300";
+    case "Configured": return "border-sky-500/25 bg-sky-500/10 text-sky-300";
+    case "Processing": return "border-sky-500/25 bg-sky-500/10 text-sky-300";
+    case "Waiting for heartbeat": return "border-amber-500/25 bg-amber-500/10 text-amber-300";
+    case "Needs attention": return "border-amber-500/25 bg-amber-500/10 text-amber-300";
+    case "Blocked": return "border-amber-500/25 bg-amber-500/10 text-amber-300";
+    case "Unavailable": return "border-rose-500/25 bg-rose-500/10 text-rose-300";
+    case "Not tested": return "border-slate-400/25 bg-slate-400/10 text-slate-300";
+    case "Not configured": return "border-slate-400/25 bg-slate-400/10 text-slate-300";
+  }
+}
 
+function StatePill({ state }: { state: ServiceState }) {
+  return <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-tech uppercase tracking-[0.12em] ${stateTone(state)}`}>{state}</span>;
+}
+
+function ConfigRow({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return (
-    <div data-page="settings">
-      <PageHeader
-        title="Settings"
-        subtitle="Connections and setup for KAGURA. Private details (like passwords or keys) are kept safe on the server and never shown here."
-      />
-
-      <Panel title="What these settings do" className="mb-6">
-        <p className="text-sm text-muted leading-relaxed">KAGURA can work with a few connections: it can watch a GitHub project for updates, use an AI helper to write drafts, and run real tests on your app via a shared local runner. You only need to change these if something isn’t connected or you want to point KAGURA at a different project.</p>
-      </Panel>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        <Panel title="Project updates (GitHub)" description="Where KAGURA looks for new changes in your project.">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-muted">GitHub connection</span>
-            <StatusBadge status={obs.tokenConfigured ? "passed" : "blocked"} />
-          </div>
-          <div className="text-sm space-y-1">
-            <p className={obs.tokenConfigured ? "text-emerald-300" : "text-warning"}>
-              {obs.tokenConfigured ? "Connected — can read updates from GitHub." : "Not fully connected — checking locally when possible."}
-            </p>
-            <p className="text-xs text-muted">Watching: <span className="text-fg font-medium break-all">{obs.repo}</span></p>
-            <p className="text-xs text-muted">Updates saved: {obs.eventsCount} · Last checked: {obs.state.lastObservedAt ? new Date(obs.state.lastObservedAt).toLocaleString() : "never"}</p>
-            {obs.state.lastStatus === "failed" && obs.state.lastError ? <p className="text-xs text-rose-300">Last issue: {obs.state.lastError}</p> : null}
-          </div>
-          <GitHubConfigForm initialOwner={obs.config.owner} initialRepo={obs.config.repo} configuredIn={obs.config.configuredIn} />
-          <ObserveAction />
-          <details className="mt-3">
-            <summary className="cursor-pointer text-xs text-accent">Setup help (for admins)</summary>
-            <div className="mt-2 text-xs text-muted space-y-1">
-              <p>To connect GitHub, add <code>GITHUB_TOKEN</code> in your server settings (never in shared/public files). This lets KAGURA read project updates.</p>
-              <p>Repository can be set with <code>GITHUB_REPO_OWNER</code> / <code>GITHUB_REPO_NAME</code> or <code>GITHUB_REPO</code>.</p>
-            </div>
-          </details>
-        </Panel>
-
-        <Panel title="Draft writing help (AI)" description="Optional help for writing story drafts.">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-muted">AI writing</span>
-            <StatusBadge status={ai.configured ? "passed" : "none"} />
-          </div>
-          <div className="text-sm space-y-1">
-            <p className={ai.configured ? "text-emerald-300" : "text-fg"}>{ai.configured ? `Connected (${ai.provider || "AI provider"})` : "Not connected — drafts will use a clear built-in template."}</p>
-            <p className="text-xs text-muted">Either way, drafts are based on real project updates and test results only (never invented).</p>
-          </div>
-          <details className="mt-3">
-            <summary className="cursor-pointer text-xs text-accent">Setup help (for admins)</summary>
-            <div className="mt-2 text-xs text-muted space-y-1">
-              <p>Add a server-side key: <code>OPENAI_API_KEY</code> or <code>ANTHROPIC_API_KEY</code>. Optionally set <code>AI_PROVIDER</code> and <code>AI_MODEL</code>. Keys are never shown.</p>
-            </div>
-          </details>
-        </Panel>
-
-        <Panel title="Testing runner" description="Real Kane CLI checks run on the shared authenticated local runner (not on the Vercel server) and sync genuine results back to KAGURA.">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-sm text-muted">Runner connectivity</span>
-            <StatusBadge status={runnerConnected ? "passed" : "blocked"} />
-          </div>
-          <div className="text-sm space-y-1">
-            <p className={runnerConnected ? "text-emerald-300" : "text-warning"}>
-              {runnerConnected ? "Connected — runner heartbeat is recent." : runnerConfigured ? "Disconnected — no recent runner heartbeat." : "Not configured — set KAGURA_RUNNER_TOKEN and start the local runner."}
-            </p>
-            <dl className="grid grid-cols-2 gap-2 text-xs mt-2">
-              <div><dt className="text-muted">Runner token</dt><dd className="font-medium text-fg">{runnerConfigured ? "Configured" : "Not set"}</dd></div>
-              <div><dt className="text-muted">Last heartbeat</dt><dd className="font-medium text-fg">{heartbeat.lastHeartbeat ? `${new Date(heartbeat.lastHeartbeat).toLocaleString()} (${ageLabel(heartbeat.lastHeartbeat)})` : "Never"}</dd></div>
-              <div><dt className="text-muted">Runner version</dt><dd className="font-medium text-fg break-all">{heartbeat.version || "Unknown"}</dd></div>
-              <div><dt className="text-muted">Pending jobs</dt><dd className="font-medium text-fg">{pendingJobs}</dd></div>
-              <div><dt className="text-muted">Last successful run</dt><dd className="font-medium text-fg">{heartbeat.lastSuccessfulExecution ? new Date(heartbeat.lastSuccessfulExecution).toLocaleString() : lastSuccessful?.finishedAt ? new Date(lastSuccessful.finishedAt).toLocaleString() : "None recorded"}</dd></div>
-              <div><dt className="text-muted">Latest test record</dt><dd className="font-medium text-fg">{latestVer ? <><StatusBadge status={latestVer.outcome} /> <span className="ml-1">{new Date(latestVer.startedAt).toLocaleString()}</span></> : "None"}</dd></div>
-            </dl>
-            {heartbeat.note ? <p className="text-xs text-muted mt-1">{heartbeat.note}</p> : null}
-          </div>
-          <details className="mt-3">
-            <summary className="cursor-pointer text-xs text-accent">Technical details</summary>
-            <div className="mt-2 text-xs text-muted space-y-1 break-all">
-              <p>App address for tests: <code>{appUrl}</code></p>
-              <p>Project scope: <code>{projectId}</code></p>
-              {heartbeat.runnerId ? <p>Runner ID: <code>{heartbeat.runnerId}</code></p> : null}
-              {heartbeat.currentJobId ? <p>Current job: <code>{heartbeat.currentJobId}</code></p> : null}
-              <p>Status is based on actual runner heartbeats, not token presence. Kane CLI is never executed on the hosted server.</p>
-            </div>
-          </details>
-        </Panel>
-
-        <Panel title="Publishing & safety" description="How stories are shared and how access is protected.">
-          <div className="text-sm space-y-2">
-            <p><span className="text-fg font-medium">Publishing:</span> drafts are only shared when you choose <strong>Approve &amp; publish</strong>. There is no automatic publishing.</p>
-            <p><span className="text-fg font-medium">Public pages:</span> visitors can see the <Link href="/stories" className="text-accent underline">Published stories</Link> pages.</p>
-            <p><span className="text-fg font-medium">Private/admin pages:</span> Home, history, tests, draft review, and settings are for managing KAGURA. On a live site these should be protected with an admin password/token.</p>
-            <p><span className="text-fg font-medium">Your secrets:</span> keys, tokens, and passwords are stored on the server and are not shown in this app.</p>
-          </div>
-          <details className="mt-3">
-            <summary className="cursor-pointer text-xs text-accent">Technical details</summary>
-            <div className="mt-2 text-xs text-muted space-y-1">
-              <p>Admin protection uses <code>KAGURA_ADMIN_TOKEN</code> (or <code>ADMIN_PASSWORD</code>) when configured. Runner access uses a separate <code>KAGURA_RUNNER_TOKEN</code>. Set <code>KAGURA_APP_URL</code> to your live site address for tests/links.</p>
-            </div>
-          </details>
-        </Panel>
-      </div>
+    <div className="rounded-lg border border-border/70 bg-bg/20 p-3">
+      <div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">{label}</div>
+      <div className="mt-1 text-sm text-fg break-words">{value}</div>
+      {detail ? <div className="mt-1 text-xs text-muted">{detail}</div> : null}
     </div>
   );
+}
+
+
+export default async function SettingsPage() {
+  const principal = await getServerPrincipal();
+  const projectId = await resolveProjectId();
+  const allowLegacy = !principal.userId || principalHasLegacyAccess(principal);
+
+  const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
+  const [obs, ai, heartbeatRaw, pendingJobs, verifications] = await Promise.all([
+    getObservationStatus({ privileged: !!scope.privileged }).catch(() => ({ config: { owner: "", repo: "", configuredIn: "file" as const }, state: {} as { lastObservedAt?: string; lastStatus?: "success" | "failed"; lastError?: string }, eventsCount: 0, tokenConfigured: false, repo: "" })),
+    Promise.resolve(aiConfigured()),
+    getRunnerHeartbeat().catch(() => ({ status: "disconnected" as const, note: "Runner heartbeat unavailable." })),
+    countPendingJobs(projectId).catch(() => 0),
+    readVerificationRecords({ requestedBy: principal.userId ?? undefined, includeLegacy: allowLegacy }).catch(() => []),
+  ]);
+  const heartbeat = heartbeatRaw as import("@/types/verification").RunnerHeartbeat;
+
+  const latestVer = verifications[0];
+  const lastSuccessful = verifications.find((r) => r.outcome === "passed");
+  const runnerConfigured = !!getRunnerToken();
+  const runnerConnected = runnerConfigured && heartbeat.status === "connected";
+  const dbAvailable = hasDatabase();
+  const adminTokenConfigured = !!(process.env.KAGURA_ADMIN_TOKEN || process.env.ECHOLOG_ADMIN_TOKEN || process.env.ADMIN_PASSWORD);
+
+  const githubState: ServiceState = !obs.tokenConfigured && !(obs.repo ?? 'Not configured') ? "Not configured" : obs.state?.lastStatus === "failed" ? "Needs attention" : obs.state?.lastStatus === "success" ? "Recently active" : obs.tokenConfigured || !!(obs.repo ?? 'Not configured') ? "Configured" : "Not configured";
+  const aiState: ServiceState = ai.configured ? "Configured" : "Not configured";
+  const runnerState: ServiceState = !runnerConfigured ? "Not configured" : runnerConnected ? (pendingJobs > 0 ? "Processing" : "Recently active") : "Waiting for heartbeat";
+  const dbState: ServiceState = dbAvailable ? "Configured" : "Not configured";
+  const adminState: ServiceState = adminTokenConfigured ? "Configured" : "Needs attention";
+
+  return (
+    <div className="space-y-6" data-page="settings">
+      <PageHeader
+        eyebrow="SETTINGS"
+        title="Settings"
+        subtitle="Manage account, integrations, and operational configuration. User-managed settings are editable here; operator-managed configuration is clearly marked and never exposes secrets."
+      />
+
+      <Panel title="Configuration overview" description="Current state from real configuration and runtime signals. Configuration presence is not proof of end-to-end connectivity or successful execution.">
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-lg border border-border bg-bg/20 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">GitHub</div><div className="mt-2"><StatePill state={githubState} /></div><div className="mt-2 text-xs text-muted">{(obs.repo ?? 'Not configured') || "No repository configured"}</div></div>
+          <div className="rounded-lg border border-border bg-bg/20 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">AI provider</div><div className="mt-2"><StatePill state={aiState} /></div><div className="mt-2 text-xs text-muted">{ai.configured ? ai.provider || "Configured" : "Template drafting fallback"}</div></div>
+          <div className="rounded-lg border border-border bg-bg/20 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Runner</div><div className="mt-2"><StatePill state={runnerState} /></div><div className="mt-2 text-xs text-muted">{runnerConnected ? `Heartbeat ${ageLabel(heartbeat.lastHeartbeat)}` : runnerConfigured ? "No recent heartbeat" : "Runner token not configured"}</div></div>
+          <div className="rounded-lg border border-border bg-bg/20 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Database</div><div className="mt-2"><StatePill state={dbState} /></div><div className="mt-2 text-xs text-muted">{dbAvailable ? "DATABASE_URL configured" : "DATABASE_URL not configured"}</div></div>
+        </div>
+      </Panel>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Panel title="Account and workspace" description="Account information comes from the authenticated session. Sensitive credentials are never shown.">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <ConfigRow label="Signed-in user" value={principal.user?.name || principal.user?.githubLogin || principal.user?.email || (principal.authorized ? "Authenticated" : "Not signed in")} detail={principal.user?.githubLogin ? `@${principal.user.githubLogin}` : undefined} />
+            <ConfigRow label="Email" value={principal.user?.email || "Not available"} />
+            <ConfigRow label="Workspace access" value={principal.kind === "admin-token" ? "Admin-token infrastructure access" : principal.user?.isBootstrapOwner ? "Bootstrap owner" : "Standard workspace user"} detail="Access is enforced by existing auth/session rules." />
+            <ConfigRow label="Project scope" value={projectId} detail="Used for project-scoped verification and runner records." />
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <a href="/api/auth/signout" className="rounded-lg border border-border bg-bg/30 px-3 py-2 text-xs text-fg hover:border-accent/40">Sign out</a>
+            <Link href="/sign-in" className="rounded-lg border border-border bg-bg/10 px-3 py-2 text-xs text-muted hover:text-fg">Account sign-in page</Link>
+          </div>
+          <p className="mt-3 text-xs text-muted">Account profile editing is limited to fields supported by the current auth/session implementation. No fake account controls are shown.</p>
+        </Panel>
+
+        <Panel title="Security and access" description="Existing security controls and access boundaries. No secrets, tokens, or passwords are displayed.">
+          <div className="space-y-3 text-sm text-muted">
+            <div className="rounded-lg border border-border/70 bg-bg/20 p-3"><div className="font-medium text-fg">Authentication</div><div className="mt-1 text-xs">Session-based user access is enforced server-side. Admin-token infrastructure access is separate and token values are never shown.</div></div>
+            <div className="rounded-lg border border-border/70 bg-bg/20 p-3"><div className="font-medium text-fg">Admin protection</div><div className="mt-1 text-xs">{adminTokenConfigured ? "An admin token/password is configured on the server." : "No admin token/password is configured. In production, protected admin access should be configured by an operator."}</div></div>
+            <div className="rounded-lg border border-border/70 bg-bg/20 p-3"><div className="font-medium text-fg">Runner access</div><div className="mt-1 text-xs">Runner API uses a separate server-configured `KAGURA_RUNNER_TOKEN`. The token value is not displayed. Runner endpoints remain authorization-protected.</div></div>
+            <div className="rounded-lg border border-border/70 bg-bg/20 p-3"><div className="font-medium text-fg">Public vs private</div><div className="mt-1 text-xs">Published stories are public. Dashboard, settings, verification, intelligence, and management actions remain protected by existing auth controls.</div></div>
+          </div>
+        </Panel>
+      </div>
+
+      <Panel title="Integrations" description="Real connection states from existing integration/configuration sources. Connect/disconnect actions use existing APIs and permission checks.">
+        <div className="grid gap-4 xl:grid-cols-2">
+          <div className="rounded-xl border border-border bg-bg/20 p-4 space-y-3">
+            <div className="flex items-center justify-between gap-2"><div><div className="text-sm font-medium text-fg">GitHub</div><div className="text-xs text-muted">Used for repository observation, commit context, and project evidence.</div></div><StatePill state={githubState} /></div>
+            <div className="grid gap-2 sm:grid-cols-2 text-xs text-muted">
+              <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Repository</div><div className="mt-1 text-fg/90 break-all">{(obs.repo ?? 'Not configured') || "Not configured"}</div></div>
+              <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Token/config</div><div className="mt-1 text-fg/90">{obs.tokenConfigured ? "Server credential configured" : "No server credential detected"}</div></div>
+              <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Last checked</div><div className="mt-1 text-fg/90">{obs.state?.lastObservedAt ? `${new Date(obs.state.lastObservedAt).toLocaleString()} (${ageLabel(obs.state.lastObservedAt)})` : "Never"}</div></div>
+              <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Observed events</div><div className="mt-1 text-fg/90">{obs.eventsCount}</div></div>
+            </div>
+            {obs.state?.lastStatus === 'failed' ? <div className="rounded-md border border-amber-500/25 bg-amber-500/10 p-2 text-xs text-amber-200">Global observation reported a failure. Details redacted from global status.</div> : null}
+            <GitHubConfigForm initialOwner={('')} initialRepo={('')} configuredIn={(obs.config.configuredIn)} />
+            <ObserveAction />
+            <p className="text-xs text-muted">OAuth/token values are never displayed. Repository discovery/connect endpoints remain available through existing GitHub integration APIs; this page preserves the existing config/observe controls.</p>
+          </div>
+
+          <div className="rounded-xl border border-border bg-bg/20 p-4 space-y-3">
+            <div className="flex items-center justify-between gap-2"><div><div className="text-sm font-medium text-fg">AI provider</div><div className="text-xs text-muted">Used for drafting assistance. Drafts must remain grounded in real evidence.</div></div><StatePill state={aiState} /></div>
+            <div className="grid gap-2 sm:grid-cols-2 text-xs text-muted">
+              <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Provider</div><div className="mt-1 text-fg/90">{ai.configured ? ai.provider || "Configured" : "Not configured"}</div></div>
+              <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Model</div><div className="mt-1 text-fg/90">{process.env.AI_MODEL ? process.env.AI_MODEL : "Default / provider-managed"}</div></div>
+              <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Availability</div><div className="mt-1 text-fg/90">{ai.configured ? "AI drafting available" : "Template fallback available"}</div></div>
+              <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Secrets</div><div className="mt-1 text-fg/90">API keys are never shown</div></div>
+            </div>
+            <div className="rounded-md border border-border/70 bg-bg/15 p-3 text-xs text-muted">
+              <div className="font-medium text-fg">Operator-managed configuration</div>
+              <p className="mt-1">AI provider keys/models are configured through server environment variables (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, optional `AI_PROVIDER`, `AI_MODEL`). Configure them outside the UI; do not paste secrets into the app.</p>
+            </div>
+          </div>
+        </div>
+      </Panel>
+
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Panel title="Runner and verification configuration" description="Runner readiness is based on real heartbeat/job records. Infrastructure problems are not project findings.">
+          <div className="flex items-center justify-between mb-3"><div className="text-sm text-muted">Runner state</div><StatePill state={runnerState} /></div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <ConfigRow label="Runner token" value={runnerConfigured ? "Configured on server" : "Not configured"} detail="Token value is never shown." />
+            <ConfigRow label="Last heartbeat" value={heartbeat.lastHeartbeat ? `${new Date(heartbeat.lastHeartbeat).toLocaleString()} (${ageLabel(heartbeat.lastHeartbeat)})` : "Never"} detail={heartbeat.note || undefined} />
+            <ConfigRow label="Runner version" value={heartbeat.version || "Unknown"} />
+            <ConfigRow label="Pending/running jobs" value={String(pendingJobs)} />
+            <ConfigRow label="Last successful execution" value={heartbeat.lastSuccessfulExecution ? new Date(heartbeat.lastSuccessfulExecution).toLocaleString() : lastSuccessful?.finishedAt ? new Date(lastSuccessful.finishedAt).toLocaleString() : "None recorded"} />
+            <ConfigRow label="Latest verification record" value={latestVer ? `${latestVer.outcome} (${fmtSafeDate(latestVer.startedAt)})` : "None"} detail={latestVer?.failingStep ? `Failing step: ${latestVer.failingStep}` : undefined} />
+          </div>
+          <div className="mt-4 rounded-lg border border-amber-500/25 bg-amber-500/10 p-3 text-xs text-amber-100/90 space-y-2">
+            <div className="font-medium text-amber-200">Operator-managed runner requirements</div>
+            <p>Run the local/shared runner outside the hosted app with required server env vars (e.g., `KAGURA_RUNNER_TOKEN`, `KAGURA_APP_URL`). The hosted server never executes Kane CLI.</p>
+            <p>Do not bypass OS-level isolation. Ordinary-user jobs must run with required isolation enabled; unavailable/misconfigured isolation should be treated as blocked/unavailable, not operational.</p>
+            <p>Sandbox credentials/passwords are never displayed and must not be entered into this UI.</p>
+          </div>
+        </Panel>
+
+        <Panel title="Notifications and preferences" description="Only preferences with real existing behavior are shown.">
+          <div className="space-y-3">
+            <div className="rounded-lg border border-border/70 bg-bg/20 p-3">
+              <div className="text-sm font-medium text-fg">Publishing control</div>
+              <p className="mt-1 text-xs text-muted">Publishing is manual and already implemented: drafts are published only through explicit review/publish actions in Intelligence. No automatic publishing toggle is exposed because it is not implemented.</p>
+            </div>
+            <div className="rounded-lg border border-border/70 bg-bg/20 p-3">
+              <div className="text-sm font-medium text-fg">Notifications</div>
+              <p className="mt-1 text-xs text-muted">No persisted in-app/email notification preference system is currently implemented. This page does not add decorative toggles. Status is visible in Activity, Verification, and runner/job records.</p>
+            </div>
+            <div className="rounded-lg border border-border/70 bg-bg/20 p-3">
+              <div className="text-sm font-medium text-fg">Theme/account preferences</div>
+              <p className="mt-1 text-xs text-muted">Theme is managed by the existing app/theme system. Additional account preferences are not fabricated here.</p>
+            </div>
+          </div>
+        </Panel>
+      </div>
+
+      <Panel title="System status and diagnostics" description="Actual available health/config signals. States distinguish operational, processing, needs attention, blocked, unavailable, and not configured.">
+        <div className="overflow-x-auto rounded-xl border border-border bg-bg/15">
+          <table className="min-w-full text-left text-sm">
+            <thead className="bg-bg/30 text-[10px] font-tech uppercase tracking-[0.14em] text-muted">
+              <tr><th className="px-3 py-3">Service</th><th className="px-3 py-3">State</th><th className="px-3 py-3">Source</th><th className="px-3 py-3">Details</th></tr>
+            </thead>
+            <tbody>
+              <tr className="border-t border-border/70"><td className="px-3 py-3">Database</td><td className="px-3 py-3"><StatePill state={dbState} /></td><td className="px-3 py-3 text-xs text-muted">DATABASE_URL/env + db helpers</td><td className="px-3 py-3 text-xs text-muted">{dbAvailable ? "Configured. Persistent stores available when DB reachable." : "Not configured. Local/dev file fallback behavior depends on runtime."}</td></tr>
+              <tr className="border-t border-border/70"><td className="px-3 py-3">GitHub integration</td><td className="px-3 py-3"><StatePill state={githubState} /></td><td className="px-3 py-3 text-xs text-muted">getObservationStatus / GitHub config</td><td className="px-3 py-3 text-xs text-muted">{('repoConfigured' in obs ? obs.repoConfigured : false) ? 'Repository configured.' : 'No repository configured.'} Last check: {obs.state?.lastObservedAt ? fmtSafeDate(obs.state.lastObservedAt) : 'never'}. Global details are redacted for safety.</td></tr>
+              <tr className="border-t border-border/70"><td className="px-3 py-3">AI provider</td><td className="px-3 py-3"><StatePill state={aiState} /></td><td className="px-3 py-3 text-xs text-muted">aiConfigured() env config</td><td className="px-3 py-3 text-xs text-muted">{ai.configured ? `Provider: ${ai.provider || "configured"}.` : "Not configured; template drafting fallback remains available."}</td></tr>
+              <tr className="border-t border-border/70"><td className="px-3 py-3">Runner</td><td className="px-3 py-3"><StatePill state={runnerState} /></td><td className="px-3 py-3 text-xs text-muted">getRunnerHeartbeat / countPendingJobs / runner token config</td><td className="px-3 py-3 text-xs text-muted">{runnerConfigured ? (runnerConnected ? `Connected. Heartbeat ${ageLabel(heartbeat.lastHeartbeat)}.` : "Token configured but heartbeat stale/unavailable.") : "KAGURA_RUNNER_TOKEN not configured."} Pending/running jobs: {pendingJobs}.</td></tr>
+              <tr className="border-t border-border/70"><td className="px-3 py-3">Admin protection</td><td className="px-3 py-3"><StatePill state={adminState} /></td><td className="px-3 py-3 text-xs text-muted">Admin token env presence</td><td className="px-3 py-3 text-xs text-muted">{adminTokenConfigured ? "Admin token/password configured on server." : "Not configured; operator should set admin token/password in production environments."}</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div className="mt-3 text-xs text-muted">Diagnostics are observational only. They distinguish configuration, liveness, and recorded activity; they do not expose credentials and do not claim end-to-end connectivity unless actually tested.</div>
+      </Panel>
+    </div>
+  );
+}
+
+function fmtSafeDate(value?: string | null): string {
+  if (!value) return "Unknown";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "Unknown";
+  return d.toLocaleString();
 }

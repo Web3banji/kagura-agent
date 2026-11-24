@@ -1,0 +1,11 @@
+﻿exports.enqueueVerificationProcessing = async () => ({});
+exports.claimPendingOutbox = async () => [];
+exports.markOutboxProcessed = async () => {};
+exports.markOutboxFailed = async () => {};
+exports.getOutboxItem = async () => null;
+exports.claimNextVerificationProcessing = async () => null;
+exports.markVerificationProcessingProcessed = async () => {};
+exports.markVerificationProcessingFailed = async () => {};
+exports.listPendingVerificationProcessing = async () => [];
+exports.readOutboxItems = async () => [];
+exports.listVerificationProcessingOutbox = async () => [];

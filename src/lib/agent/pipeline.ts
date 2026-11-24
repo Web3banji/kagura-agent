@@ -50,18 +50,36 @@ function analyseCommits(commits: ObservedCommit[]): Analysis {
   };
 }
 
+export type RunPipelineOptions = { userId?: string | null; scope?: RecordScope; system?: false } | { system: true; userId?: string | null; scope: RecordScope & { privileged: true; includeLegacy: boolean } };
+
 export async function runPipeline(
   trigger: "manual" | "observe" = "manual",
-  opts?: { userId?: string | null; scope?: RecordScope },
+  opts: RunPipelineOptions,
 ): Promise<RunResult> {
   const scope = opts?.scope;
+  if (!scope) {
+    const state = await getCurrentPipelineState();
+    return { state, error: "Authorization scope is required for pipeline execution." };
+  }
+  if (!opts.system) {
+    if (!scope.userId && !scope.privileged) {
+      const state = await getCurrentPipelineState();
+      return { state, error: "Authenticated user scope is required for pipeline execution." };
+    }
+  } else {
+    if (!scope.privileged) {
+      const state = await getCurrentPipelineState();
+      return { state, error: "System pipeline execution requires explicit privileged scope." };
+    }
+  }
+
   const active = await getActiveRun(scope);
   if (active) {
     const state = await getCurrentPipelineState();
     return { run: active, state, error: "An agent run is already in progress." };
   }
 
-  const run = await createRun(trigger, { userId: opts?.userId ?? null });
+  const run = await createRun(trigger, { userId: opts?.userId ?? scope.userId ?? null });
   const started = new Date().toISOString();
 
   async function fail(stage: AgentRun["currentStage"], msg: string, extra?: Partial<AgentRun>): Promise<RunResult> {

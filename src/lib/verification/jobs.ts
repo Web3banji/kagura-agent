@@ -76,6 +76,7 @@ function rowToJob(row: Record<string, unknown>): VerificationJob {
     recordId: row.record_id ? String(row.record_id) : payload.recordId,
     error: row.error ? String(row.error) : payload.error,
     result: (payload.result as VerificationJob["result"]) || undefined,
+    claimGeneration: typeof row.claim_generation === "number" ? row.claim_generation : Number(row.claim_generation || payload.claimGeneration || 0),
   };
 }
 
@@ -83,12 +84,13 @@ async function upsertDbJob(job: VerificationJob): Promise<void> {
   await ensureDb();
   const p = getPool();
   await p.query(
-    `INSERT INTO verification_jobs (id, project_id, requested_by, status, payload, created_at, updated_at, claimed_at, lease_expires_at, started_at, completed_at, claimed_by, runner_id, record_id, error)
-     VALUES ($1,$2,$3,$4,$5::jsonb,$6::timestamptz,$7::timestamptz,$8::timestamptz,$9::timestamptz,$10::timestamptz,$11::timestamptz,$12,$13,$14,$15)
+    `INSERT INTO verification_jobs (id, project_id, requested_by, status, payload, created_at, updated_at, claimed_at, lease_expires_at, started_at, completed_at, claimed_by, runner_id, record_id, error, claim_generation)
+     VALUES ($1,$2,$3,$4,$5::jsonb,$6::timestamptz,$7::timestamptz,$8::timestamptz,$9::timestamptz,$10::timestamptz,$11::timestamptz,$12,$13,$14,$15,$16)
      ON CONFLICT (id) DO UPDATE SET
        project_id=EXCLUDED.project_id, requested_by=EXCLUDED.requested_by, status=EXCLUDED.status, payload=EXCLUDED.payload,
        updated_at=NOW(), claimed_at=EXCLUDED.claimed_at, lease_expires_at=EXCLUDED.lease_expires_at, started_at=EXCLUDED.started_at,
-       completed_at=EXCLUDED.completed_at, claimed_by=EXCLUDED.claimed_by, runner_id=EXCLUDED.runner_id, record_id=EXCLUDED.record_id, error=EXCLUDED.error`,
+       completed_at=EXCLUDED.completed_at, claimed_by=EXCLUDED.claimed_by, runner_id=EXCLUDED.runner_id, record_id=EXCLUDED.record_id, error=EXCLUDED.error,
+       claim_generation=EXCLUDED.claim_generation`,
     [
       job.id,
       job.projectId || "",
@@ -105,6 +107,7 @@ async function upsertDbJob(job: VerificationJob): Promise<void> {
       job.runnerId || null,
       job.recordId || null,
       job.error || null,
+      job.claimGeneration ?? 0,
     ],
   );
 }
@@ -133,6 +136,7 @@ export async function enqueueJob(job: Omit<VerificationJob, "id" | "status" | "c
     updatedAt: nowIso(),
     attempt: job.attempt ?? 0,
     recordId: job.recordId,
+    claimGeneration: job.claimGeneration ?? 0,
   };
   if (hasDatabase()) {
     await upsertDbJob(record);
@@ -184,17 +188,47 @@ export async function getJob(id: string, opts?: { projectId?: string; requestedB
   return matchesJobScope(job, opts) ? job : undefined;
 }
 
-export async function updateJob(id: string, patch: Partial<VerificationJob>): Promise<VerificationJob | undefined> {
+export type UpdateJobOpts = { expectedClaimedBy?: string; expectedStatus?: VerificationJobStatus | VerificationJobStatus[]; requireActiveLease?: boolean; expectedClaimGeneration?: number };
+
+export async function updateJob(id: string, patch: Partial<VerificationJob>, opts?: UpdateJobOpts): Promise<VerificationJob | undefined> {
+  const expectedClaimedBy = opts?.expectedClaimedBy?.trim();
+  const expectedStatus = opts?.expectedStatus;
+  const requireActiveLease = opts?.requireActiveLease === true;
+  const expectedClaimGeneration = typeof opts?.expectedClaimGeneration === "number" ? opts.expectedClaimGeneration : undefined;
+  const allowedStatuses = Array.isArray(expectedStatus) ? expectedStatus : expectedStatus ? [expectedStatus] : undefined;
+  const canApply = (current: VerificationJob): boolean => {
+    if (expectedClaimedBy && current.claimedBy !== expectedClaimedBy) return false;
+    if (allowedStatuses && !allowedStatuses.includes(current.status)) return false;
+    if (requireActiveLease && current.leaseExpiresAt && new Date(current.leaseExpiresAt).getTime() < Date.now()) return false;
+    if (expectedClaimGeneration !== undefined && (current.claimGeneration ?? 0) !== expectedClaimGeneration) return false;
+    return true;
+  };
+
   if (hasDatabase()) {
     const current = await getDbJob(id);
-    if (!current) return undefined;
+    if (!current || !canApply(current)) return undefined;
     const next: VerificationJob = { ...current, ...patch, updatedAt: nowIso() };
-    await upsertDbJob(next);
-    return next;
+    await ensureDb();
+    const p = getPool();
+    const fullParams: unknown[] = [next.projectId || "", next.requestedBy || "", next.status, JSON.stringify(next), next.updatedAt || nowIso(), next.claimedAt || null, next.leaseExpiresAt || null, next.startedAt || null, next.completedAt || null, next.claimedBy || null, next.runnerId || null, next.recordId || null, next.error || null, next.claimGeneration ?? 0, id];
+    let statusClause = "";
+    let claimedByClause = "";
+    let leaseClause = "";
+    let generationClause = "";
+    if (allowedStatuses) { fullParams.push(allowedStatuses); statusClause = ` AND status = ANY($${fullParams.length}::text[])`; }
+    if (expectedClaimedBy) { fullParams.push(expectedClaimedBy); claimedByClause = ` AND claimed_by = $${fullParams.length}`; }
+    if (requireActiveLease) { leaseClause = ` AND (lease_expires_at IS NULL OR lease_expires_at >= NOW())`; }
+    if (expectedClaimGeneration !== undefined) { fullParams.push(expectedClaimGeneration); generationClause = ` AND claim_generation = $${fullParams.length}`; }
+    const sql = `UPDATE verification_jobs SET project_id=$1, requested_by=$2, status=$3, payload=$4::jsonb, updated_at=$5::timestamptz,
+      claimed_at=$6::timestamptz, lease_expires_at=$7::timestamptz, started_at=$8::timestamptz, completed_at=$9::timestamptz,
+      claimed_by=$10, runner_id=$11, record_id=$12, error=$13, claim_generation=$14 WHERE id=$15${statusClause}${claimedByClause}${leaseClause}${generationClause} RETURNING *`;
+    const res = await p.query(sql, fullParams);
+    if (!res.rows[0]) return undefined;
+    return rowToJob(res.rows[0] as Record<string, unknown>);
   }
   const jobs = await readJobsFile();
   const idx = jobs.findIndex((j) => j.id === id);
-  if (idx < 0) return undefined;
+  if (idx < 0 || !canApply(jobs[idx])) return undefined;
   jobs[idx] = { ...jobs[idx], ...patch, updatedAt: nowIso() };
   await writeJobsFile(jobs);
   return jobs[idx];
@@ -213,7 +247,8 @@ export async function claimNextJob(opts?: { runnerId?: string; leaseMs?: number 
       const res = await client.query(
         `UPDATE verification_jobs
          SET status='claimed', claimed_at=NOW(), updated_at=NOW(), claimed_by=$1, runner_id=$1, lease_expires_at=$2::timestamptz,
-             payload = jsonb_set(jsonb_set(jsonb_set(COALESCE(payload,'{}'::jsonb), '{claimedBy}', to_jsonb($1::text)), '{runnerId}', to_jsonb($1::text)), '{leaseExpiresAt}', to_jsonb($2::text))
+             claim_generation = COALESCE(claim_generation, 0) + 1,
+             payload = jsonb_set(jsonb_set(jsonb_set(jsonb_set(COALESCE(payload,'{}'::jsonb), '{claimedBy}', to_jsonb($1::text)), '{runnerId}', to_jsonb($1::text)), '{leaseExpiresAt}', to_jsonb($2::text)), '{claimGeneration}', to_jsonb(COALESCE(claim_generation, 0) + 1))
          WHERE id = (
            SELECT id FROM verification_jobs
            WHERE status = 'pending' OR (status IN ('claimed','running') AND lease_expires_at IS NOT NULL AND lease_expires_at < NOW())
@@ -239,7 +274,8 @@ export async function claimNextJob(opts?: { runnerId?: string; leaseMs?: number 
     (j) => j.status === "pending" || ((j.status === "claimed" || j.status === "running") && j.leaseExpiresAt && new Date(j.leaseExpiresAt).getTime() < Date.now()),
   );
   if (idx < 0) return null;
-  jobs[idx] = { ...jobs[idx], status: "claimed", claimedAt: nowIso(), claimedBy: runnerId, runnerId, leaseExpiresAt: leaseUntil, updatedAt: nowIso(), attempt: (jobs[idx].attempt || 0) + 1 };
+  const prevGen = typeof jobs[idx].claimGeneration === "number" ? jobs[idx].claimGeneration : 0;
+  jobs[idx] = { ...jobs[idx], status: "claimed", claimedAt: nowIso(), claimedBy: runnerId, runnerId, leaseExpiresAt: leaseUntil, updatedAt: nowIso(), attempt: (jobs[idx].attempt || 0) + 1, claimGeneration: prevGen + 1 };
   await writeJobsFile(jobs);
   return jobs[idx];
 }
@@ -248,7 +284,7 @@ export async function setJobRunning(id: string, runnerId: string): Promise<Verif
   const job = await getJob(id);
   if (!job) return undefined;
   if (job.claimedBy && job.claimedBy !== runnerId && job.runnerId && job.runnerId !== runnerId) return undefined;
-  return updateJob(id, { status: "running", startedAt: job.startedAt || nowIso(), runnerId });
+  return updateJob(id, { status: "running", startedAt: job.startedAt || nowIso(), runnerId }, { expectedClaimedBy: runnerId, expectedStatus: ["claimed","running"], expectedClaimGeneration: job.claimGeneration ?? 0, requireActiveLease: true });
 }
 
 export async function countPendingJobs(projectId?: string): Promise<number> {
@@ -296,4 +332,17 @@ export function outcomeFromJobStatus(status: VerificationJobStatus): Verificatio
   if (status === "failed") return "failed";
   if (status === "running" || status === "claimed") return "running";
   return "pending";
+}
+
+
+/** @internal Test/migration-only raw overwrite. */
+export async function __unsafeWriteJobsForTests(jobs: VerificationJob[]): Promise<void> {
+  if (hasDatabase()) {
+    await ensureDb();
+    const p = getPool();
+    await p.query("DELETE FROM verification_jobs");
+    for (const job of jobs.slice(0, 200)) await upsertDbJob(job);
+    return;
+  }
+  await writeJobsFile(jobs);
 }

@@ -72,13 +72,14 @@ async function handleRegenerate(req: Request) {
       },
       { focus: story.tags.find((t) => !["development", "kane-cli"].includes(t)) || "general", reason: "Regenerated from existing real evidence." },
       verification,
-      { userId: story.userId ?? principal.userId },
+      { userId: story.userId ?? principal.userId, projectId: story.projectId ?? verification?.projectId ?? null },
     );
     const updated = {
       ...draft,
       id: story.id,
       slug: story.slug,
       userId: story.userId,
+      projectId: story.projectId ?? draft.projectId ?? null,
       createdAt: story.createdAt,
       updatedAt: new Date().toISOString(),
       status: "review" as const,

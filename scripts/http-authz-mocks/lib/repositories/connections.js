@@ -1,0 +1,2 @@
+﻿exports.getRepositoryConnectionForUser = async (id, userId) => { const m = globalThis.__testRepoConnections || new Map(); const c = m.get(id); if(!c) return null; return c.userId===userId ? structuredClone(c) : null; };
+exports.resolveActiveRepositoryConnectionId = async (projectId, requestedBy) => { const fn = globalThis.__testResolveRepo; if (fn) return fn(projectId, requestedBy); return null; };

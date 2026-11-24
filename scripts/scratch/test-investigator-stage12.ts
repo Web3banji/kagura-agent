@@ -78,9 +78,7 @@ async function runTests() {
   await check("verification record linked to investigation", async () => {
     const record = makeRecord({ failingStep: "Link test step" });
     const result = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: TEST_PROJECT,
-    });
+      ownerUserId: TEST_USER, projectId: TEST_PROJECT });
     assert.equal(result.action, "created");
     const invId = result.investigations[0].id;
 
@@ -116,9 +114,7 @@ async function runTests() {
       summary: "Issue A summary",
     });
     const result1 = await processVerificationResult(record1, {
-      ownerUserId: TEST_USER,
-      projectId: multiProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(result1.action, "created");
 
     const record2 = makeRecord({
@@ -129,9 +125,7 @@ async function runTests() {
       jobId: record1.jobId + "-b",
     });
     const result2 = await processVerificationResult(record2, {
-      ownerUserId: TEST_USER,
-      projectId: multiProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(result2.action, "created");
 
     const all = await readInvestigations({
@@ -160,9 +154,7 @@ async function runTests() {
       summary: "Repeated summary",
     });
     const r1 = await processVerificationResult(record1, {
-      ownerUserId: TEST_USER,
-      projectId: dupProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(r1.action, "created");
 
     const record2 = makeRecord({
@@ -172,9 +164,7 @@ async function runTests() {
       id: r1.investigations[0].verificationReferences[0].verificationId + "-repeat",
     });
     const r2 = await processVerificationResult(record2, {
-      ownerUserId: TEST_USER,
-      projectId: dupProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(r2.action, "updated");
     assert.equal(r2.investigations[0].verificationReferences.length, 2);
 
@@ -200,9 +190,7 @@ async function runTests() {
 
     // After processing: processed
     const result = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: stateProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     const updated = await upsertVerificationRecord(
       {
         ...record,
@@ -227,9 +215,7 @@ async function runTests() {
       summary: undefined,
     });
     const result = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: blockedProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(result.action, "none");
     assert.equal(result.investigations.length, 0);
 
@@ -246,9 +232,7 @@ async function runTests() {
       summary: "Alpha summary",
     });
     await processVerificationResult(record1, {
-      ownerUserId: TEST_USER,
-      projectId: unrelProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
 
     const record2 = makeRecord({
       projectId: unrelProject,
@@ -256,9 +240,7 @@ async function runTests() {
       summary: "Beta summary",
     });
     const result2 = await processVerificationResult(record2, {
-      ownerUserId: TEST_USER,
-      projectId: unrelProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(result2.action, "created");
 
     const all = await readInvestigations({
@@ -278,9 +260,7 @@ async function runTests() {
       failingStep: "Resolve test step",
     });
     const created = await processVerificationResult(failed, {
-      ownerUserId: TEST_USER,
-      projectId: resolveProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(created.action, "created");
     assert.equal(created.investigations[0].status, "open");
 
@@ -295,9 +275,7 @@ async function runTests() {
       runEnd: { status: "passed" },
     });
     const resolved = await processVerificationResult(passed, {
-      ownerUserId: TEST_USER,
-      projectId: resolveProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(resolved.action, "resolved");
     assert.equal(resolved.investigations[0].status, "resolved");
   });
@@ -310,9 +288,7 @@ async function runTests() {
       failingStep: "Unrelated step",
     });
     await processVerificationResult(failed, {
-      ownerUserId: TEST_USER,
-      projectId: otherProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
 
     const passedOther = makeRecord({
       id: "ver-pass-other",
@@ -325,9 +301,7 @@ async function runTests() {
       runEnd: { status: "passed" },
     });
     const result = await processVerificationResult(passedOther, {
-      ownerUserId: TEST_USER,
-      projectId: otherProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(result.action, "none");
   });
 
@@ -358,9 +332,7 @@ async function runTests() {
 
     // Recovery: retry processing.
     const recovered = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: failProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(recovered.action, "created");
 
     const recoveredUpdated = await upsertVerificationRecord(
@@ -382,9 +354,7 @@ async function runTests() {
       failingStep: "Isolation test step",
     });
     await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: isoProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
 
     const others = await readInvestigations({
       userId: "other-user",
@@ -404,9 +374,7 @@ async function runTests() {
       summary: undefined,
     });
     const result = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: naProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(result.action, "none");
     // The investigation processing state should remain pending/none, not "failed".
     assert.equal(record.investigationProcessing?.state, "pending");
@@ -446,9 +414,7 @@ async function runTests() {
       investigationProcessing: { state: "processed", processedAt: new Date().toISOString() },
     });
     const result = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: idemProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     // Since no pre-existing investigation exists in the store, this creates one.
     assert.equal(result.action, "created");
     assert.equal(result.investigations.length, 1);
@@ -474,9 +440,7 @@ async function runTests() {
 
     // Step 2: complete processing → processed.
     const result = await processVerificationResult(processing, {
-      ownerUserId: TEST_USER,
-      projectId: proc2Project,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     const completed = await upsertVerificationRecord(
       {
         ...processing,
@@ -519,17 +483,13 @@ async function runTests() {
 
     // First processing attempt creates investigation.
     const first = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: dupProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(first.action, "created");
 
     // Second attempt with same failing step → updated, not created.
     // Same verificationId → reference is deduplicated (not added twice).
     const second = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: dupProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(second.action, "updated");
     assert.equal(second.investigations[0].verificationReferences.length, 1);
 
@@ -566,9 +526,7 @@ async function runTests() {
     // Recovery: reclaim the stale processing attempt and run investigation processing.
     process.env.KAGURA_INVESTIGATOR_STALE_PROCESSING_MS = "1";
     const recovered = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: staleProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.ok(recovered.action === "created" || recovered.action === "updated");
 
     // Finalize as processed.
@@ -667,9 +625,7 @@ async function runTests() {
     assert.equal(isStale, true);
 
     const recovered = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: interruptProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.ok(recovered.action === "created" || recovered.action === "updated");
 
     // Finalize as processed.
@@ -695,25 +651,19 @@ async function runTests() {
     });
     // First processing creates investigation with one reference.
     const first = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: dedupProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(first.action, "created");
     assert.equal(first.investigations[0].verificationReferences.length, 1);
 
     // Second processing with same verificationId → deduplicated, still 1 reference.
     const second = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: dedupProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(second.action, "updated");
     assert.equal(second.investigations[0].verificationReferences.length, 1);
 
     // Recovery after processing → should not add duplicate references.
     const recovered = await processVerificationResult(record, {
-      ownerUserId: TEST_USER,
-      projectId: dedupProject,
-    });
+      ownerUserId: TEST_USER, projectId:  });
     assert.equal(recovered.action, "updated");
     assert.equal(recovered.investigations[0].verificationReferences.length, 1);
   });

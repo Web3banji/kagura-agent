@@ -54,6 +54,7 @@ export function verificationToJournal(record: VerificationRecord): JournalEvent 
     title: `${record.flow}: ${record.outcome}`,
     summary: record.summary || "Kane verification executed.",
     timestamp: record.finishedAt || record.startedAt,
-    refs: [record.evidencePath, record.testUrl, record.sessionDir, record.ndjsonPath].filter(Boolean) as string[],
+    // Never expose internal filesystem paths/URLs in activity feeds.
+    refs: [record.flow, record.id].filter(Boolean) as string[],
   };
 }

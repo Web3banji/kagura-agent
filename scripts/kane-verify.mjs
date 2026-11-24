@@ -18,7 +18,7 @@ const FLOWS = {
   "shell-nav": {
     flow: "shell-nav",
     objective:
-      'Go to the provided URL. Verify the page shows "KAGURA" and "Home & status". Click the "Activity history" link in the sidebar navigation and verify the Activity history page is displayed. Click the "Checks & tests" link in the sidebar navigation and verify the Checks & tests page is displayed. Click the "Published stories" link in the sidebar navigation and verify the Stories page is displayed. Return to "Home & status" and verify it is displayed.',
+      'On the already opened page at the provided URL, verify the page shows "KAGURA" and "Home & status". Do not navigate away except by clicking sidebar links. Click the "Activity history" sidebar link and verify the Activity history page is displayed. Click the "Checks & tests" sidebar link and verify the Checks & tests page is displayed. Click the "Published stories" sidebar link and verify the Stories page is displayed. Click "Home & status" and verify it is displayed.',
   },
 };
 
@@ -73,7 +73,9 @@ async function main() {
     await fs.mkdir(resolvedProfile, { recursive: true });
   }
 
-  const args = ["run", objective, "--agent", "--url", opts.url];
+  // kane-cli run does not accept --url; include target URL in objective for genuine navigation.
+  const objectiveWithUrl = /\bhttps?:\/\//i.test(objective) ? objective : `Open ${opts.url}. ${objective}`;
+  const args = ["run", objectiveWithUrl, "--agent"];
   if (opts.headless) args.push("--headless");
   if (opts.timeout) args.push("--timeout", String(opts.timeout));
   if (opts.name) args.push("--name", opts.name);

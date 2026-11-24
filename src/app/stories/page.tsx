@@ -1,12 +1,14 @@
 import { EmptyState } from "@/components/ui/Primitives";
-import { readStories } from "@/lib/stories/store";
+import { readPublishedStories } from "@/lib/stories/store";
+import { toPublicStory } from "@/lib/stories/public";
 import Link from "next/link";
 
 export const dynamic = "force-dynamic";
 
 export default async function StoriesPage() {
-  const stories = (await readStories())
-    .filter((s) => s.status === "published")
+  const stories = (await readPublishedStories())
+    .map(toPublicStory)
+    .filter((s): s is NonNullable<typeof s> => !!s)
     .sort((a, b) => new Date(b.publishedAt || b.updatedAt).getTime() - new Date(a.publishedAt || a.updatedAt).getTime());
 
   return (
@@ -25,7 +27,7 @@ export default async function StoriesPage() {
         ) : (
           <ul className="space-y-4">
             {stories.map((s) => (
-              <li key={s.id} className="rounded-xl border border-border bg-panel/70 p-5">
+              <li key={s.slug} className="rounded-xl border border-border bg-panel/70 p-5">
                 <div className="text-xs text-muted">
                   Published {s.publishedAt ? new Date(s.publishedAt).toLocaleString() : new Date(s.updatedAt).toLocaleString()}
                   {s.verification ? (
