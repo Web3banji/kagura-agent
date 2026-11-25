@@ -747,6 +747,7 @@ export async function runRunnerLoop(deps = {}) {
     }
 
     try { await flushSyncQueueFn(cfg, runnerId); } catch {}
+   try { await apiRequestFn(cfg, "POST", "/api/runner/reconciliation/drain", { workerId: runnerId }, 30000); } catch {}
     if (executing) { await sleepFn(500); continue; }
 
     log("Checking for jobs...");
@@ -842,6 +843,7 @@ export async function runRunnerLoop(deps = {}) {
     } else {
       log("Result synchronized successfully");
     }
+     try { await apiRequestFn(cfg, "POST", "/api/runner/reconciliation/drain", { workerId: runnerId }, 30000); } catch {}
 
     processedJobs++;
     executing = false;

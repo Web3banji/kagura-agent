@@ -206,6 +206,13 @@ async function handleComplete(req: Request) {
     }
     const updated = completion.job;
     const persisted = completion.record;
+    let agentRunReconciliation: { updated: boolean; reason: string; runId?: string } = { updated: false, reason: "not_attempted" };
+    try {
+      const { reconcileAgentRunForVerification } = await import("@/lib/agent/runs");
+      agentRunReconciliation = await reconcileAgentRunForVerification(job.id, outcome, result.summary || result.failingStep);
+    } catch (err) {
+      agentRunReconciliation = { updated: false, reason: err instanceof Error ? err.message : String(err) };
+    }
     let investigationIds: string[] = persisted.investigationIds ?? [];
     let investigationState: "pending" | "processing" | "processed" | "failed" = persisted.investigationProcessing?.state ?? (outcome !== "pending" && outcome !== "running" ? "pending" : "processed");
     if (outcome !== "pending" && outcome !== "running") {
@@ -221,7 +228,18 @@ async function handleComplete(req: Request) {
     if (outcome === "passed") {
       try { await markRunnerSuccess(finishedAt); } catch { /* heartbeat persistence is best-effort; completion already persisted */ }
     }
-    return NextResponse.json({ ok: true, job: updated, record: { ...persisted, investigationIds, investigationProcessing: { ...(persisted.investigationProcessing || {}), state: investigationState } }, investigationProcessed: investigationState === "processed" });
+    return NextResponse.json({ ok: true, job: updated, record: { ...persisted, investigationIds, investigationProcessing: { ...(persisted.investigationProcessing || {}), state: investigationState } }, investigationProcessed: investigationState === "processed", agentRunReconciliation });
+  } catch (err) {
+    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+  }
+}
+
+async function handleReconciliationDrain(req: Request) {
+  if (!isRunnerAuthorized(req)) return runnerUnauthorized();
+  try {
+    const { reconcilePendingAgentRuns } = await import("@/lib/agent/runs");
+    const result = await reconcilePendingAgentRuns();
+    return NextResponse.json({ ok: true, ...result });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
   }
@@ -257,5 +275,6 @@ export async function POST(req: Request, ctx: { params: { path?: string[] } }) {
   if (path === "complete") return handleComplete(req);
   if (path === "heartbeat") return handleHeartbeatPost(req);
   if (path === "processing/drain") return handleProcessingDrain(req);
+  if (path === "reconciliation/drain") return handleReconciliationDrain(req);
   return notFound();
 }

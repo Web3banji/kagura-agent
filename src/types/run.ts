@@ -1,9 +1,9 @@
-export type AgentRunStatus = "running" | "completed" | "failed";
+export type AgentRunStatus = "running" | "completed" | "failed" | "blocked" | "incomplete";
 export type AgentStage = "OBSERVE" | "ANALYSE" | "VERIFY" | "WRITE" | "REVIEW" | "PUBLISH";
 
 export interface StageRecord {
   stage: AgentStage;
-  status: "pending" | "running" | "completed" | "failed" | "skipped";
+  status: "pending" | "running" | "completed" | "failed" | "skipped" | "blocked" | "incomplete";
   startedAt?: string;
   finishedAt?: string;
   note?: string;

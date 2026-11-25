@@ -1,7 +1,7 @@
 import type { VerificationOutcome } from "@/types/verification";
 import { statusInfo } from "@/lib/ui-text";
 
-type BadgeStatus = VerificationOutcome | "idle" | "none" | "completed" | "success" | "skipped";
+type BadgeStatus = VerificationOutcome | "idle" | "none" | "completed" | "success" | "skipped" | "incomplete";
 
 const styles: Record<string, string> = {
   pending: "bg-white/[0.04] text-muted border-border",
