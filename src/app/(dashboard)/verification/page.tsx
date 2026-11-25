@@ -119,13 +119,30 @@ export default async function VerificationLabPage() {
     if (single) projectIds.push(single);
   }
 
-  const [recordsPerProject, investigations, jobs, runnerHeartbeat, projectMeta] = await Promise.all([
+  const [recordsPerProject, investigations, jobs, rawHeartbeat, projectMeta] = await Promise.all([
     Promise.all(projectIds.map((projectId) => readVerificationRecords({ projectId, includeLegacy: !!scope.includeLegacy, requestedBy: scope.privileged ? undefined : principal.userId }).catch(() => [] as VerificationRecord[]))),
     readInvestigations(scope).catch(() => [] as Investigation[]),
     readJobs({ requestedBy: scope.privileged ? undefined : principal.userId, includeLegacy: !!scope.includeLegacy }).catch(() => []),
     getRunnerHeartbeat().catch(() => ({ status: "disconnected" as const, note: "Runner status unavailable." })),
     resolveProjectMeta(projectIds, principal.userId),
   ]);
+  const runnerHeartbeat = rawHeartbeat as import("@/types/verification").RunnerHeartbeat;
+  const readinessLabel = !runnerHeartbeat.readiness
+    ? "Unknown/unverified"
+    : runnerHeartbeat.readiness.state === "ready"
+      ? "Authenticated and ready"
+      : runnerHeartbeat.readiness.state === "kane_unauthenticated" || runnerHeartbeat.readiness.state === "kane_auth_expired"
+        ? "Authentication required"
+        : runnerHeartbeat.readiness.state === "kane_missing"
+          ? "KANE CLI unavailable"
+          : runnerHeartbeat.readiness.state === "browser_unavailable" || runnerHeartbeat.readiness.state === "profile_unavailable"
+            ? "Browser prerequisites unavailable"
+            : runnerHeartbeat.readiness.state === "isolation_unavailable"
+              ? "Isolation unavailable"
+              : runnerHeartbeat.readiness.state === "configuration_missing"
+                ? "Configuration missing"
+                : "Unknown/unverified";
+  const readinessClass = runnerHeartbeat.readiness?.ready ? "text-emerald-300 font-medium" : "text-amber-300 font-medium";
 
   const seen = new Set<string>();
   const allRecords: VerificationRecord[] = [];
@@ -194,10 +211,11 @@ export default async function VerificationLabPage() {
           </div>
           <div className="mt-4 space-y-2 text-xs text-muted">
             <div className="flex justify-between gap-3"><span>Runner status</span><span className={runnerHeartbeat.status === "connected" ? "text-emerald-300 font-medium" : "text-amber-300 font-medium"}>{runnerHeartbeat.status === "connected" ? "Connected" : "Not connected"}</span></div>
+            <div className="flex justify-between gap-3"><span>KANE readiness</span><span className={readinessClass}>{readinessLabel}</span></div>
             <div className="flex justify-between gap-3"><span>Active/queued jobs</span><span className="text-fg font-medium">{activeJobs.length}</span></div>
             <div className="flex justify-between gap-3"><span>Latest project repository</span><span className="text-fg font-medium break-all text-right">{latestProject.repo || "Not assigned"}</span></div>
           </div>
-          <details className="mt-4 text-xs text-muted"><summary className="cursor-pointer text-accent">Runner and execution details</summary><div className="mt-2 space-y-1 break-all"><div>Runner status: {runnerHeartbeat.status}</div>{"runnerId" in runnerHeartbeat && runnerHeartbeat.runnerId ? <div>Runner ID: <span className="font-mono">{runnerHeartbeat.runnerId}</span></div> : null}{"lastHeartbeat" in runnerHeartbeat && runnerHeartbeat.lastHeartbeat ? <div>Last heartbeat: {fmtDate(runnerHeartbeat.lastHeartbeat)}</div> : null}{"lastSuccessfulExecution" in runnerHeartbeat && runnerHeartbeat.lastSuccessfulExecution ? <div>Last successful execution: {fmtDate(runnerHeartbeat.lastSuccessfulExecution)}</div> : null}{runnerHeartbeat.note ? <div>Note: {runnerHeartbeat.note}</div> : null}</div></details>
+          <details className="mt-4 text-xs text-muted"><summary className="cursor-pointer text-accent">Runner and execution details</summary><div className="mt-2 space-y-1 break-all"><div>Runner status: {runnerHeartbeat.status}</div><div>KANE readiness: {runnerHeartbeat.readiness?.state || "unknown"}{runnerHeartbeat.readiness?.ready ? " (ready)" : " (not ready)"}</div>{runnerHeartbeat.readiness?.reason ? <div>Readiness reason: {runnerHeartbeat.readiness.reason}</div> : null}{runnerHeartbeat.readiness?.checkedAt ? <div>Readiness checked: {fmtDate(runnerHeartbeat.readiness.checkedAt)}</div> : null}{runnerHeartbeat.runnerId ? <div>Runner ID: <span className="font-mono">{runnerHeartbeat.runnerId}</span></div> : null}{runnerHeartbeat.lastHeartbeat ? <div>Last heartbeat: {fmtDate(runnerHeartbeat.lastHeartbeat)}</div> : null}{runnerHeartbeat.lastSuccessfulExecution ? <div>Last successful execution: {fmtDate(runnerHeartbeat.lastSuccessfulExecution)}</div> : null}{runnerHeartbeat.note ? <div>Note: {runnerHeartbeat.note}</div> : null}</div></details>
         </Panel>
       </section>
 

@@ -1,1 +1,1 @@
-﻿exports.claimNextJob=async()=>null; exports.countPendingJobs=async()=>0; exports.getJob=async()=>null; exports.markRunnerSuccess=async()=>undefined; exports.getRunnerHeartbeat=async()=>({}); exports.recordHeartbeat=async()=>({});
+﻿exports.claimNextJob=async()=>null; exports.countPendingJobs=async()=>0; exports.getJob=async()=>null; exports.markRunnerSuccess=async()=>undefined; exports.getRunnerHeartbeat=async()=>({status:"disconnected",readiness:{state:"unknown",ready:false}}); exports.recordHeartbeat=async(h)=>({status:"connected",...h}); exports.readJobs=async()=>[];

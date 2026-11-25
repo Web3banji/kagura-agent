@@ -28,6 +28,7 @@ import {
   validateJobForExecution,
   isShellSafeArg,
 } from "./runner-security.mjs";
+import { assessKaneReadiness, READINESS_STATES } from "./kane-readiness.mjs";
 
 const require = createRequire(import.meta.url);
 
@@ -601,44 +602,82 @@ async function pruneStaleWorkspaces(retentionDays) {
   return { removed };
 }
 
-async function main() {
+export async function runRunnerLoop(deps = {}) {
   await loadEnv();
-  const cfg = getConfig();
-  const isolation = getIsolationConfig();
+  const cfg = deps.cfg ?? getConfig();
+  const isolation = deps.isolation ?? getIsolationConfig();
   log(`Runner isolation: mode=${isolation.mode} sandboxUser=${isolation.sandboxUser || "(none)"}`);
   if (!cfg.base) {
     console.error("KAGURA_RUNNER_TOKEN/KAGURA_APP_URL configuration error: KAGURA_APP_URL is required.");
-    process.exit(2);
+    return { exitCode: 2, reason: "configuration_missing" };
   }
   if (!cfg.token) {
     console.error("KAGURA_RUNNER_TOKEN/KAGURA_APP_URL configuration error: KAGURA_RUNNER_TOKEN is required.");
-    process.exit(2);
+    return { exitCode: 2, reason: "configuration_missing" };
   }
 
-  const runnerId = await getOrCreateRunnerId();
-  const version = getVersion();
+  const runnerId = deps.runnerId ?? await getOrCreateRunnerId();
+  const version = deps.version ?? getVersion();
+  const assessReadiness = deps.assessReadiness ?? ((opts) => assessKaneReadiness(opts));
+  const assessIsolationFn = deps.assessIsolation ?? assessIsolationOnce;
+  const requiresIsolationFn = deps.requiresIsolation ?? ((job, isolateAll) => requiresIsolationForJob(job, { isolateAllJobs: isolateAll }));
+  const executeJob = deps.executeKaneJob ?? executeKaneJob;
+  const apiRequestFn = deps.apiRequest ?? apiRequest;
+  const syncWithRetry = deps.syncCompletionWithRetry ?? ((c, pld) => syncCompletionWithRetry(c, pld));
+  const enqueuePendingSyncFn = deps.enqueuePendingSync ?? enqueueSync;
+  const sleepFn = deps.sleep ?? sleep;
+  const flushSyncQueueFn = deps.flushSyncQueue ?? flushSyncQueue;
+  const pruneStaleWorkspacesFn = deps.pruneStaleWorkspaces ?? pruneStaleWorkspaces;
+  const maxJobs = Number.isFinite(deps.maxJobs) ? deps.maxJobs : Infinity;
+  const stopAfterMs = Number.isFinite(deps.stopAfterMs) ? deps.stopAfterMs : null;
+  const startedLoopAt = Date.now();
 
   let stopping = false;
   let executing = false;
   let claimBackoff = 1000;
   let hbBackoff = 1000;
   let lastHeartbeatOk = false;
+  let processedJobs = 0;
+  let lastReadiness = { state: READINESS_STATES.UNKNOWN, ready: false, reason: "Kane readiness has not been checked yet." };
+
+  async function refreshReadiness(note = "readiness-check") {
+    const browserProfile = path.join(isolation.profilesRoot, "readiness-probe");
+    const readiness = await assessReadiness({
+      rootDir: ROOT,
+      env: process.env,
+      timeoutMs: Number(process.env.KAGURA_KANE_READINESS_TIMEOUT_MS || 15000),
+      profileDir: browserProfile,
+      chromeProfileDir: browserProfile,
+    });
+    lastReadiness = {
+      state: readiness.state,
+      ready: readiness.ready === true,
+      checkedAt: readiness.checkedAt,
+      reason: readiness.reason,
+      details: readiness.details,
+    };
+    if (!lastReadiness.ready) log(`Kane readiness: ${lastReadiness.state}${lastReadiness.reason ? ` (${lastReadiness.reason})` : ""}`);
+    return lastReadiness;
+  }
 
   const requestStop = (sig) => {
     if (stopping) return;
     stopping = true;
     log(`KAGURA RUNNER: shutdown requested (${sig}). ${executing ? "Will stop after current job completes/syncs." : "Stopping."}`);
   };
-  process.on("SIGINT", () => requestStop("SIGINT"));
-  process.on("SIGTERM", () => requestStop("SIGTERM"));
+  if (!deps.disableSignals) {
+    process.on("SIGINT", () => requestStop("SIGINT"));
+    process.on("SIGTERM", () => requestStop("SIGTERM"));
+  }
 
   async function sendHeartbeat(note, currentJobId) {
     try {
-      const res = await apiRequest(cfg, "POST", "/api/runner/heartbeat", {
+      const res = await apiRequestFn(cfg, "POST", "/api/runner/heartbeat", {
         runnerId,
         version,
         currentJobId: currentJobId || undefined,
         note: note || undefined,
+        readiness: lastReadiness,
       });
       if (res.status >= 200 && res.status < 300) {
         if (!lastHeartbeatOk) log("Heartbeat successful");
@@ -659,12 +698,12 @@ async function main() {
   log(`Runner ID: ${runnerId}`);
   log(`Runner version: ${version}`);
 
-  // Initial connectivity/auth probe via heartbeat (token never logged)
   try {
-    const probe = await apiRequest(cfg, "POST", "/api/runner/heartbeat", { runnerId, version, note: "startup" });
+    await refreshReadiness("startup");
+    const probe = await apiRequestFn(cfg, "POST", "/api/runner/heartbeat", { runnerId, version, note: "startup", readiness: lastReadiness });
     if (probe.status === 401 || probe.status === 403) {
       console.error("Runner authentication failed (unauthorized). Check KAGURA_RUNNER_TOKEN.");
-      process.exit(1);
+      return { exitCode: 1, reason: "unauthorized" };
     }
     if (probe.status >= 200 && probe.status < 300) {
       log("Backend connected");
@@ -678,68 +717,61 @@ async function main() {
     log("Backend not reachable at startup; will retry with backoff.");
   }
 
-  // Flush any pending sync payloads from previous runs
   try {
-    const flushed = await flushSyncQueue(cfg, runnerId);
+    const flushed = await flushSyncQueueFn(cfg, runnerId);
     if (flushed.flushed > 0) log(`KAGURA RUNNER: flushed ${flushed.flushed} pending sync payload(s)`);
   } catch {}
 
-  // Optional stale per-job workspace pruning (disabled unless retention is configured).
   const retentionDays = Number(process.env.KAGURA_RUNNER_WORKSPACE_RETENTION_DAYS || 0);
   if (retentionDays > 0) {
     try {
-      const pruned = await pruneStaleWorkspaces(retentionDays);
+      const pruned = await pruneStaleWorkspacesFn(retentionDays);
       if (pruned.removed > 0) log(`KAGURA RUNNER: pruned ${pruned.removed} stale job workspace(s)`);
     } catch {}
   }
 
   let idleHeartbeatAt = 0;
   while (!stopping) {
-    // periodic idle heartbeat
+    if (stopAfterMs != null && Date.now() - startedLoopAt >= stopAfterMs) break;
+    if (processedJobs >= maxJobs) break;
+
     const now = Date.now();
     if (now - idleHeartbeatAt >= cfg.heartbeatMs) {
       const ok = await sendHeartbeat("idle");
       idleHeartbeatAt = Date.now();
       if (!ok) {
-        await sleep(hbBackoff);
+        await sleepFn(hbBackoff);
         hbBackoff = nextBackoff(hbBackoff, cfg.maxBackoffMs);
         continue;
       }
     }
 
-    // attempt to flush pending syncs opportunistically
-    try {
-      await flushSyncQueue(cfg, runnerId);
-    } catch {}
-
-    if (executing) {
-      await sleep(500);
-      continue;
-    }
+    try { await flushSyncQueueFn(cfg, runnerId); } catch {}
+    if (executing) { await sleepFn(500); continue; }
 
     log("Checking for jobs...");
     let claimRes;
     try {
-      claimRes = await apiRequest(cfg, "POST", "/api/runner/claim", { runnerId, version }, 30000);
+      claimRes = await apiRequestFn(cfg, "POST", "/api/runner/claim", { runnerId, version }, 30000);
     } catch {
-      await sleep(claimBackoff);
+      await sleepFn(claimBackoff);
       claimBackoff = nextBackoff(claimBackoff, cfg.maxBackoffMs);
       continue;
     }
 
     if (claimRes.status === 401 || claimRes.status === 403) {
       console.error("Runner authentication failed during claim (unauthorized). Check KAGURA_RUNNER_TOKEN.");
-      await sleep(claimBackoff);
+      await sleepFn(claimBackoff);
       claimBackoff = nextBackoff(claimBackoff, cfg.maxBackoffMs);
       continue;
     }
     if (claimRes.status === 204) {
       claimBackoff = 1000;
-      await sleep(cfg.pollMs);
+      await sleepFn(cfg.pollMs);
       continue;
     }
     if (!(claimRes.status >= 200 && claimRes.status < 300) || !claimRes.data || !claimRes.data.job) {
-      await sleep(claimBackoff);
+      await sleepFn(claimBackoff);
       claimBackoff = nextBackoff(claimBackoff, cfg.maxBackoffMs);
       continue;
     }
@@ -750,71 +782,87 @@ async function main() {
     executing = true;
     await sendHeartbeat("claimed", job.id);
 
+    await refreshReadiness("pre-execution");
+    const requiresIso = requiresIsolationFn(job, isolation.isolateAllJobs);
+    let isolationState = null;
+    if (requiresIso) isolationState = await assessIsolationFn(isolation);
+    const blockedReason = !lastReadiness.ready
+      ? `Runner readiness blocked: ${lastReadiness.state}${lastReadiness.reason ? ` - ${lastReadiness.reason}` : ""}`
+      : (requiresIso && isolationState && !isolationState.ok)
+        ? `Runner readiness blocked: isolation_unavailable - ${isolationState.reason || "OS isolation unavailable"}`
+        : null;
+    if (blockedReason) {
+      const finishedAt = new Date().toISOString();
+      const blockedPayload = {
+        jobId: job.id, runnerId, claimedBy: runnerId, recordId: job.recordId || job.id,
+        outcome: "did_not_start", exitCode: null, summary: blockedReason, failingStep: "Runner readiness",
+        durationMs: 0, runEnd: { status: "did_not_start", summary: blockedReason }, stderr: "", command: "kane-readiness",
+        startedAt: finishedAt, finishedAt,
+      };
+      log(`Readiness blocked execution for job ${job.id}: ${lastReadiness.state}`);
+      await sendHeartbeat("blocked", job.id);
+      try {
+        const syncRes = await syncWithRetry(cfg, blockedPayload);
+        if (syncRes.ok) log(`KAGURA RUNNER: synced blocked/readiness job ${job.id}`);
+        else {
+          const nonRetriable = syncRes.status === 409 || syncRes.status === 403 || syncRes.status === 404;
+          await enqueuePendingSyncFn(blockedPayload, syncRes.reason, nonRetriable);
+          log(`KAGURA RUNNER: readiness-blocked sync not completed for ${job.id} (${syncRes.reason || `HTTP ${syncRes.status}`}); retained.`);
+        }
+      } catch (err) {
+        await enqueuePendingSyncFn(blockedPayload, err instanceof Error ? err.message : String(err), false);
+      }
+      processedJobs++;
+      executing = false;
+      await sendHeartbeat("idle");
+      await sleepFn(250);
+      continue;
+    }
+
     let resultPayload;
     try {
       log("Executing Kane verification...");
-      resultPayload = await executeKaneJob(job, runnerId, async (note) => sendHeartbeat(note, job.id));
+      resultPayload = await executeJob(job, runnerId, async (note) => sendHeartbeat(note, job.id));
       log(`Execution finished: ${resultPayload.outcome || "unknown"}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       resultPayload = {
-        jobId: job.id,
-        runnerId,
-        claimedBy: runnerId,
-        outcome: "did_not_start",
-        exitCode: 2,
-        summary: `Runner execution error: ${msg}`,
-        startedAt: new Date().toISOString(),
-        finishedAt: new Date().toISOString(),
+        jobId: job.id, runnerId, claimedBy: runnerId, outcome: "did_not_start", exitCode: 2,
+        summary: `Runner execution error: ${msg}`, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
       };
       log("Execution finished: did_not_start");
     }
 
-    // Sync result with bounded retries; never discard
     log("Synchronizing result...");
-    let synced = false;
-    let syncDelay = 1000;
-    for (let attempt = 1; attempt <= 5; attempt++) {
-      try {
-        const completeRes = await apiRequest(cfg, "POST", "/api/runner/complete", resultPayload, 45000);
-        if (completeRes.status >= 200 && completeRes.status < 300) {
-          synced = true;
-          log("Result synchronized successfully");
-          break;
-        }
-        if (completeRes.status === 409 || completeRes.status === 403 || completeRes.status === 404) {
-          const file = await enqueueSync(resultPayload, `non-retriable-${completeRes.status}`);
-          log(`KAGURA RUNNER: sync not accepted (HTTP ${completeRes.status}); payload retained at ${path.relative(ROOT, file)}`);
-          synced = true; // retained, not silently discarded
-          break;
-        }
-      } catch {}
-      if (attempt < 5) {
-        await sleep(syncDelay);
-        syncDelay = nextBackoff(syncDelay, 30000);
-      }
-    }
-    if (!synced) {
-      const file = await enqueueSync(resultPayload, "retry-exhausted");
-      log(`KAGURA RUNNER: sync unavailable; payload retained locally at ${path.relative(ROOT, file)}`);
+    const syncRes = await syncWithRetry(cfg, resultPayload);
+    if (!syncRes.ok) {
+      const nonRetriable = syncRes.status === 409 || syncRes.status === 403 || syncRes.status === 404;
+      await enqueuePendingSyncFn(resultPayload, syncRes.reason, nonRetriable);
+      log(`KAGURA RUNNER: sync not completed for ${job.id} (${syncRes.reason || `HTTP ${syncRes.status}`}); payload retained for retry.`);
+    } else {
+      log("Result synchronized successfully");
     }
 
-    await sendHeartbeat("idle");
+    processedJobs++;
     executing = false;
-
-    if (stopping) break;
+    await sendHeartbeat("idle");
   }
 
-  // best-effort final heartbeat/flush
-  try {
-    await flushSyncQueue(cfg, runnerId);
-  } catch {}
+  try { await refreshReadiness("shutdown"); await flushSyncQueueFn(cfg, runnerId); } catch {}
   await sendHeartbeat(stopping ? "stopping" : "idle");
-  log("KAGURA RUNNER STOPPED");
+  log("KAGURA RUNNER: stopped.");
+  return { exitCode: 0, reason: "stopped", processedJobs };
 }
 
-main().catch((err) => {
-  const msg = err instanceof Error ? err.message : String(err);
-  console.error(`KAGURA RUNNER: fatal error: ${msg}`);
-  process.exit(1);
-});
+async function main() {
+  const res = await runRunnerLoop();
+  if (res && typeof res.exitCode === "number" && res.exitCode !== 0) process.exit(res.exitCode);
+}
+
+const isDirectRun = process.argv[1] && path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+if (isDirectRun) {
+  main().catch((err) => {
+    console.error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  });
+}

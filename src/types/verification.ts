@@ -115,6 +115,29 @@ export interface VerificationJob {
   claimGeneration?: number;
 }
 
+export type RunnerReadinessState =
+  | "ready"
+  | "kane_missing"
+  | "kane_unauthenticated"
+  | "kane_auth_expired"
+  | "browser_unavailable"
+  | "profile_unavailable"
+  | "isolation_unavailable"
+  | "configuration_missing"
+  | "unknown";
+
+export interface RunnerReadiness {
+  state: RunnerReadinessState;
+  ready: boolean;
+  checkedAt?: string;
+  reason?: string;
+  details?: {
+    cliResolved?: boolean;
+    exitCode?: number | null;
+    timedOut?: boolean;
+  };
+}
+
 export interface RunnerHeartbeat {
   runnerId?: string;
   status: "connected" | "disconnected";
@@ -124,4 +147,5 @@ export interface RunnerHeartbeat {
   currentJobId?: string;
   pendingJobs?: number;
   note?: string;
+  readiness?: RunnerReadiness;
 }

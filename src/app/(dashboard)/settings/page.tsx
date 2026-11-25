@@ -14,7 +14,7 @@ import { ObserveAction } from "./observe-action";
 
 export const dynamic = "force-dynamic";
 
-type ServiceState = "Configured" | "Not configured" | "Recently active" | "Processing" | "Waiting for heartbeat" | "Needs attention" | "Unavailable" | "Blocked" | "Not tested";
+type ServiceState = "Configured" | "Not configured" | "Recently active" | "Processing" | "Waiting for heartbeat" | "Needs attention" | "Unavailable" | "Blocked" | "Not tested" | "KANE CLI unavailable" | "KANE auth required" | "Browser prerequisites unavailable" | "Isolation unavailable";
 
 function ageLabel(iso?: string): string {
   if (!iso) return "Never";
@@ -39,6 +39,10 @@ function stateTone(state: ServiceState): string {
     case "Blocked": return "border-amber-500/25 bg-amber-500/10 text-amber-300";
     case "Unavailable": return "border-rose-500/25 bg-rose-500/10 text-rose-300";
     case "Not tested": return "border-slate-400/25 bg-slate-400/10 text-slate-300";
+    case "KANE CLI unavailable": return "border-amber-500/25 bg-amber-500/10 text-amber-300";
+    case "KANE auth required": return "border-amber-500/25 bg-amber-500/10 text-amber-300";
+    case "Browser prerequisites unavailable": return "border-amber-500/25 bg-amber-500/10 text-amber-300";
+    case "Isolation unavailable": return "border-amber-500/25 bg-amber-500/10 text-amber-300";
     case "Not configured": return "border-slate-400/25 bg-slate-400/10 text-slate-300";
   }
 }
@@ -77,12 +81,31 @@ export default async function SettingsPage() {
   const lastSuccessful = verifications.find((r) => r.outcome === "passed");
   const runnerConfigured = !!getRunnerToken();
   const runnerConnected = runnerConfigured && heartbeat.status === "connected";
+  const readiness = heartbeat.readiness;
   const dbAvailable = hasDatabase();
   const adminTokenConfigured = !!(process.env.KAGURA_ADMIN_TOKEN || process.env.ECHOLOG_ADMIN_TOKEN || process.env.ADMIN_PASSWORD);
 
   const githubState: ServiceState = !obs.tokenConfigured && !(obs.repo ?? 'Not configured') ? "Not configured" : obs.state?.lastStatus === "failed" ? "Needs attention" : obs.state?.lastStatus === "success" ? "Recently active" : obs.tokenConfigured || !!(obs.repo ?? 'Not configured') ? "Configured" : "Not configured";
   const aiState: ServiceState = ai.configured ? "Configured" : "Not configured";
-  const runnerState: ServiceState = !runnerConfigured ? "Not configured" : runnerConnected ? (pendingJobs > 0 ? "Processing" : "Recently active") : "Waiting for heartbeat";
+  const runnerState: ServiceState = !runnerConfigured
+    ? "Not configured"
+    : !runnerConnected
+      ? "Waiting for heartbeat"
+      : readiness?.state === "kane_missing"
+        ? "KANE CLI unavailable"
+        : readiness?.state === "kane_unauthenticated" || readiness?.state === "kane_auth_expired"
+          ? "KANE auth required"
+          : readiness?.state === "browser_unavailable" || readiness?.state === "profile_unavailable"
+            ? "Browser prerequisites unavailable"
+            : readiness?.state === "isolation_unavailable"
+              ? "Isolation unavailable"
+              : readiness?.state === "configuration_missing"
+                ? "Needs attention"
+                : readiness && !readiness.ready
+                  ? "Needs attention"
+                  : pendingJobs > 0
+                    ? "Processing"
+                    : "Recently active";
   const dbState: ServiceState = dbAvailable ? "Configured" : "Not configured";
   const adminState: ServiceState = adminTokenConfigured ? "Configured" : "Needs attention";
 
@@ -166,6 +189,7 @@ export default async function SettingsPage() {
           <div className="grid gap-3 sm:grid-cols-2">
             <ConfigRow label="Runner token" value={runnerConfigured ? "Configured on server" : "Not configured"} detail="Token value is never shown." />
             <ConfigRow label="Last heartbeat" value={heartbeat.lastHeartbeat ? `${new Date(heartbeat.lastHeartbeat).toLocaleString()} (${ageLabel(heartbeat.lastHeartbeat)})` : "Never"} detail={heartbeat.note || undefined} />
+            <ConfigRow label="KANE readiness" value={runnerConnected ? (readiness?.state === "ready" ? "KANE CLI authenticated and ready" : readiness?.state === "kane_unauthenticated" || readiness?.state === "kane_auth_expired" ? "KANE CLI authentication required" : readiness?.state === "kane_missing" ? "KANE CLI unavailable" : readiness?.state === "browser_unavailable" || readiness?.state === "profile_unavailable" ? "Browser/profile prerequisites unavailable" : readiness?.state === "isolation_unavailable" ? "OS isolation unavailable" : readiness?.state === "configuration_missing" ? "Runner configuration missing" : "Readiness unknown/unverified") : "Runner disconnected; readiness unknown"} detail={readiness?.reason ? `Sanitized status: ${readiness.reason}` : "No readiness details reported."} />
             <ConfigRow label="Runner version" value={heartbeat.version || "Unknown"} />
             <ConfigRow label="Pending/running jobs" value={String(pendingJobs)} />
             <ConfigRow label="Last successful execution" value={heartbeat.lastSuccessfulExecution ? new Date(heartbeat.lastSuccessfulExecution).toLocaleString() : lastSuccessful?.finishedAt ? new Date(lastSuccessful.finishedAt).toLocaleString() : "None recorded"} />
@@ -175,6 +199,7 @@ export default async function SettingsPage() {
             <div className="font-medium text-amber-200">Operator-managed runner requirements</div>
             <p>Run the local/shared runner outside the hosted app with required server env vars (e.g., `KAGURA_RUNNER_TOKEN`, `KAGURA_APP_URL`). The hosted server never executes Kane CLI.</p>
             <p>Do not bypass OS-level isolation. Ordinary-user jobs must run with required isolation enabled; unavailable/misconfigured isolation should be treated as blocked/unavailable, not operational.</p>
+            <p>KANE account authentication and target-application browser authentication are different. This page reports runner/KANE CLI readiness only; target-app auth is handled separately.</p>
             <p>Sandbox credentials/passwords are never displayed and must not be entered into this UI.</p>
           </div>
         </Panel>

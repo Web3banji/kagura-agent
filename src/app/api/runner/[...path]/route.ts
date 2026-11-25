@@ -3,7 +3,7 @@ import { isRunnerAuthorized, runnerUnauthorized } from "@/lib/auth/runner";
 import { claimNextJob, countPendingJobs, getJob, markRunnerSuccess, getRunnerHeartbeat, recordHeartbeat } from "@/lib/verification/jobs";
 import { completeJobAtomically } from "@/lib/verification/completion";
 import { AccessDeniedError } from "@/lib/auth/scope";
-import type { VerificationJobResult, VerificationOutcome, VerificationRecord } from "@/types/verification";
+import type { RunnerReadiness, RunnerReadinessState, VerificationJobResult, VerificationOutcome, VerificationRecord } from "@/types/verification";
 
 export const dynamic = "force-dynamic";
 
@@ -59,12 +59,23 @@ async function handleHeartbeatGet(req: Request) {
 async function handleHeartbeatPost(req: Request) {
   if (!isRunnerAuthorized(req)) return runnerUnauthorized();
   try {
-    const body = (await req.json().catch(() => ({}))) as { runnerId?: string; version?: string; currentJobId?: string; note?: string };
+    const body = (await req.json().catch(() => ({}))) as { runnerId?: string; version?: string; currentJobId?: string; note?: string; readiness?: unknown };
+    const readinessBody = body.readiness && typeof body.readiness === "object" ? (body.readiness as Record<string, unknown>) : undefined;
+    const readinessState = typeof readinessBody?.state === "string" ? (readinessBody.state as RunnerReadinessState) : undefined;
+    const readiness: RunnerReadiness | undefined = readinessState
+      ? {
+          state: readinessState,
+          ready: readinessBody?.ready === true,
+          checkedAt: typeof readinessBody?.checkedAt === "string" ? readinessBody.checkedAt : undefined,
+          reason: typeof readinessBody?.reason === "string" ? readinessBody.reason.slice(0, 240) : undefined,
+        }
+      : undefined;
     const hb = await recordHeartbeat({
       runnerId: typeof body.runnerId === "string" ? body.runnerId : undefined,
       version: typeof body.version === "string" ? body.version : undefined,
       currentJobId: typeof body.currentJobId === "string" ? body.currentJobId : undefined,
       note: typeof body.note === "string" ? body.note.slice(0, 300) : undefined,
+      readiness,
     });
     const pendingJobs = await countPendingJobs();
     return NextResponse.json({ ...hb, pendingJobs });

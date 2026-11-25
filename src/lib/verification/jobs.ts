@@ -300,6 +300,7 @@ export async function recordHeartbeat(hb: Partial<RunnerHeartbeat> & { runnerId?
     status: "connected",
     lastHeartbeat: nowIso(),
   };
+  if (hb.readiness) next.readiness = hb.readiness;
   await kvSet(HEARTBEAT_KEY, next);
   return next;
 }
@@ -312,7 +313,7 @@ export async function markRunnerSuccess(executionAt = nowIso()): Promise<void> {
 export async function getRunnerHeartbeat(): Promise<RunnerHeartbeat> {
   const hb = await kvGet<RunnerHeartbeat>(HEARTBEAT_KEY);
   if (!hb || !hb.lastHeartbeat) {
-    return { status: "disconnected", note: "No runner heartbeat recorded." };
+    return { status: "disconnected", note: "No runner heartbeat recorded.", readiness: { state: "unknown", ready: false, reason: "No runner heartbeat recorded." } };
   }
   const age = Date.now() - new Date(hb.lastHeartbeat).getTime();
   const connected = age <= HEARTBEAT_TTL_MS;
@@ -320,6 +321,7 @@ export async function getRunnerHeartbeat(): Promise<RunnerHeartbeat> {
     ...hb,
     status: connected ? "connected" : "disconnected",
     note: connected ? hb.note : "Runner heartbeat is stale.",
+    readiness: connected ? hb.readiness : { state: "unknown", ready: false, reason: "Runner heartbeat is stale; readiness is unknown." },
   };
 }
 
