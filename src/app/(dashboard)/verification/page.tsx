@@ -178,7 +178,7 @@ export default async function VerificationLabPage() {
       <PageHeader
         title="Verification"
         subtitle="See real check results, confirmed project issues, and checks that could not run. Nothing here is a guess."
-        actions={<RerunVerificationButton />}
+        actions={<RerunVerificationButton availableProjectIds={projectIds} />}
       />
 
       <section className="grid gap-4 xl:grid-cols-[1.5fr_1fr]">
@@ -206,7 +206,7 @@ export default async function VerificationLabPage() {
             <h3 className="text-base font-semibold text-fg">{nextAction.title}</h3>
             <p className="mt-2 text-sm text-muted leading-relaxed">{nextAction.detail}</p>
             <div className="mt-4 flex flex-wrap gap-2">
-              {nextAction.href === "/verification" ? <RerunVerificationButton /> : <Link href={nextAction.href} className="inline-flex items-center px-4 py-2.5 rounded-md bg-accent text-black font-tech uppercase tracking-[0.12em] text-xs font-bold hover:brightness-110 shadow-glow">{nextAction.cta}</Link>}
+              {nextAction.href === "/verification" ? <RerunVerificationButton availableProjectIds={projectIds} /> : <Link href={nextAction.href} className="inline-flex items-center px-4 py-2.5 rounded-md bg-accent text-black font-tech uppercase tracking-[0.12em] text-xs font-bold hover:brightness-110 shadow-glow">{nextAction.cta}</Link>}
             </div>
           </div>
           <div className="mt-4 space-y-2 text-xs text-muted">
