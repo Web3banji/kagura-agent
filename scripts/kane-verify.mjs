@@ -12,13 +12,23 @@
 import { spawn } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
+import { existsSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { randomUUID } from "crypto";
+
+function resolveKaneCliEntry() {
+  const envBin = process.env.KAGURA_KANE_CLI_BIN?.trim();
+  if (envBin && existsSync(envBin)) return resolve(envBin);
+  const installed = join(process.cwd(), "node_modules", "@testmuai", "kane-cli", "bin", "kane-cli.cjs");
+  if (existsSync(installed)) return installed;
+  return installed;
+}
 
 const FLOWS = {
   "shell-nav": {
     flow: "shell-nav",
     objective:
-      'On the already opened page at the provided URL, verify the page shows "KAGURA" and "Home & status". Do not navigate away except by clicking sidebar links. Click the "Activity history" sidebar link and verify the Activity history page is displayed. Click the "Checks & tests" sidebar link and verify the Checks & tests page is displayed. Click the "Published stories" sidebar link and verify the Stories page is displayed. Click "Home & status" and verify it is displayed.',
+      'On the already opened page at the provided URL, verify the page shows "KAGURA" and "Home & status". Do not navigate away except by clicking sidebar links. Click the "Activity history" sidebar link and verify the Activity history page is displayed. Click the "Checks & tests" sidebar link and verify the Checks & tests page is displayed. Click the "Reports" sidebar link and verify the Reports page is displayed. Click "Home & status" and verify it is displayed.',
   },
 };
 
@@ -81,18 +91,13 @@ async function main() {
   if (opts.name) args.push("--name", opts.name);
   if (resolvedProfile) args.push("--chrome-profile", resolvedProfile);
 
-  const isWin = process.platform === "win32";
-  const child = isWin
-    ? spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "kane-cli", ...args], {
-        env: { ...process.env, KANE_CLI_USER_AGENT: "kilocode" },
-        cwd: process.cwd(),
-        windowsHide: true,
-      })
-    : spawn("kane-cli", args, {
-        shell: false,
-        env: { ...process.env, KANE_CLI_USER_AGENT: "kilocode" },
-        cwd: process.cwd(),
-      });
+  const entry = resolveKaneCliEntry();
+  const child = spawn(process.execPath, [entry, ...args], {
+    shell: false,
+    env: { ...process.env, KANE_CLI_USER_AGENT: "kilocode" },
+    cwd: process.cwd(),
+    windowsHide: true,
+  });
 
   let stdout = "";
   let stderr = "";
@@ -103,7 +108,7 @@ async function main() {
     const result = {
       id, flow: flowDef?.flow || "custom", objective, url: opts.url,
       outcome: "did_not_start", exitCode: 2,
-      summary: `Failed to start kane-cli: ${err.message}`,
+      summary: `Failed to start kane-cli (${entry}): ${err.message}`,
       startedAt, finishedAt: new Date().toISOString(), ndjsonPath, stderr,
     };
     await fs.writeFile(ndjsonPath, "", "utf8").catch(() => {});
@@ -150,6 +155,7 @@ async function main() {
       evidencePath: evidenceMatch?.[1],
       testUrl: runEnd?.test_url,
       sessionDir: runEnd?.session_dir,
+      resolvedCli: entry,
       startedAt,
       finishedAt: new Date().toISOString(),
       ndjsonPath,
@@ -174,4 +180,6 @@ async function appendRecord(record) {
   await fs.writeFile(storeFile, JSON.stringify(records, null, 2), "utf8");
 }
 
-main();
+if (process.argv[1] && process.argv[1].endsWith("kane-verify.mjs")) main();
+
+export { resolveKaneCliEntry, mapOutcome };

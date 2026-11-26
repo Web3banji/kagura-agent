@@ -27,7 +27,7 @@ mock.module(outboxWorkerPath, {
 });
 
 async function main() {
-  const mod = await import('../src/app/api/runner/[...path]/route.ts');
+  const mod = await import('../src/app/api/runner/[...path]/handler.ts');
   async function call(body: any, headers: Record<string, string> = {}) {
     const req = new Request('http://localhost/api/runner/processing/drain', {
       method: 'POST',

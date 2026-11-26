@@ -11,8 +11,6 @@ import type { Story } from "@/types/story";
 import type { Investigation } from "@/types/investigation";
 import type { VerificationRecord } from "@/types/verification";
 
-export const dynamic = "force-dynamic";
-
 type ReportStatus = "published" | "attention";
 
 function fmtDate(value?: string | null): string {
@@ -21,7 +19,6 @@ function fmtDate(value?: string | null): string {
   if (Number.isNaN(d.getTime())) return "Unknown date";
   return d.toLocaleString();
 }
-
 
 async function resolveProjectNames(projectIds: string[], userId: string | undefined): Promise<Map<string, string>> {
   const map = new Map<string, string>();
@@ -64,8 +61,7 @@ function normalize(v: string | string[] | undefined): string {
   return typeof v === "string" ? v.trim() : "";
 }
 
-
-export default async function ReportsPage({
+export default async function ReportsSection({
   searchParams,
 }: {
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
@@ -159,7 +155,6 @@ export default async function ReportsPage({
     return qs ? `/reports?${qs}` : "/reports";
   }
 
-
   return (
     <div className="space-y-6">
       <PageHeader
@@ -186,7 +181,7 @@ export default async function ReportsPage({
         </form>
 
         {reports.length === 0 ? (
-          <EmptyState title="No published reports yet" detail="Approved drafts from Intelligence become published reports. If no draft has been published, there is no report to show here." action={<Link href="/editorial" className="text-sm text-accent underline">Open Intelligence</Link>} />
+          <EmptyState title="No published reports yet" detail="Published report records will appear here after they are generated from real project activity and verification evidence. If no report has been published, there is no report to show here." />
         ) : filtered.length === 0 ? (
           <EmptyState title="No reports match these filters" detail="Try a different search, type, project, or status filter. Only real persisted reports are shown." />
         ) : (
@@ -239,7 +234,6 @@ export default async function ReportsPage({
                       <p className="mt-1 text-sm text-muted">{selected.subtitle || "No subtitle recorded."}</p>
                     </div>
                     <div className="flex flex-wrap gap-2 text-xs">
-                      <Link href={`/stories/${selected.slug}`} className="rounded-lg border border-border bg-bg/30 px-3 py-2 text-fg hover:border-accent/40">Open report</Link>
                       {selected.verification?.testUrl ? <a href={selected.verification.testUrl} target="_blank" rel="noreferrer" className="rounded-lg border border-border bg-bg/30 px-3 py-2 text-fg hover:border-accent/40">External test report</a> : null}
                     </div>
                   </div>
@@ -309,8 +303,6 @@ export default async function ReportsPage({
                       {selectedInvestigations.length ? <div className="sm:col-span-2"><dt className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Linked investigations</dt><dd className="text-fg/90 break-words">{selectedInvestigations.map((i) => `${i.id} (${i.status})`).join(" | ")}</dd></div> : null}
                     </dl>
                     <div className="mt-3 flex flex-wrap gap-3 text-xs">
-                      <Link href={`/stories/${selected.slug}`} className="text-accent underline">Open public report page</Link>
-                      <Link href="/editorial" className="text-accent underline">Open Intelligence</Link>
                       <Link href="/verification" className="text-accent underline">Open Verification</Link>
                     </div>
                   </details>
@@ -323,11 +315,10 @@ export default async function ReportsPage({
         )}
       </Panel>
 
-      <Panel title="Report generation" description="Report generation uses the existing Intelligence draft/publish workflow. This page does not create fake reports or synthetic success states.">
+      <Panel title="Report generation" description="Report generation uses existing published report records and verification evidence. This page does not create fake reports or synthetic success states.">
         <div className="text-sm text-muted space-y-2">
-          <p>To create a report, generate or review a draft in Intelligence and publish it only when the evidence supports it. Published stories appear here as reports.</p>
-          <p>If required source data is missing, Intelligence and Verification will show the missing/blocked state; Reports will not invent report content.</p>
-          <div className="pt-1"><Link href="/editorial" className="text-accent underline text-sm">Go to Intelligence drafts</Link></div>
+          <p>Reports are generated from real project activity and verification evidence. Published report records appear here without inventing report content.</p>
+          <p>If required source data is missing, Verification will show the missing/blocked state; Reports will not invent report content.</p>
         </div>
       </Panel>
     </div>

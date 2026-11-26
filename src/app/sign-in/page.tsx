@@ -1,4 +1,3 @@
-import Link from "next/link";
 import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth/session";
 import { githubOAuthConfigured } from "@/lib/auth/oauth";
@@ -38,7 +37,7 @@ export default async function SignInPage({
           <div className="font-tech text-xs tracking-[0.22em] text-accent uppercase">KAGURA</div>
           <h1 className="mt-2 text-xl font-semibold text-fg">Sign in</h1>
           <p className="mt-1 text-sm text-muted">
-            Sign in to access your KAGURA dashboard. Public stories remain available without signing in.
+            Sign in to access your KAGURA dashboard.
           </p>
         </div>
 
@@ -72,9 +71,6 @@ export default async function SignInPage({
         )}
 
         <div className="mt-5 flex items-center justify-between text-xs text-muted">
-          <Link href="/stories" className="text-accent hover:underline">
-            View published stories
-          </Link>
           <span>Secure session cookie</span>
         </div>
       </div>

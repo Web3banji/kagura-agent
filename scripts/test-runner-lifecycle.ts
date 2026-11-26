@@ -6,7 +6,7 @@ process.loadEnvFile('.env.local');
 delete process.env.DATABASE_URL;
 import assert from 'node:assert/strict';
 import { NextRequest } from 'next/server';
-import { POST as runnerPost } from '@/app/api/runner/[...path]/route';
+import { POST as runnerPost } from '@/app/api/runner/[...path]/handler';
 import { enqueueJob, claimNextJob, getJob, updateJob, __unsafeWriteJobsForTests } from '@/lib/verification/jobs';
 import { __unsafeWriteVerificationRecordsForTests, readVerificationRecords } from '@/lib/verification/store';
 import { __unsafeWriteInvestigationsForTests, readInvestigations } from '@/lib/investigations/store';

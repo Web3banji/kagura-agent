@@ -4,7 +4,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { readVerificationRecords, summarizeOutcome } from "@/lib/verification/store";
 import { readInvestigations } from "@/lib/investigations/store";
 import { readJobs, getRunnerHeartbeat } from "@/lib/verification/jobs";
-import { RerunVerificationButton } from "./rerun-button";
+import { RerunVerificationButton } from "@/app/(dashboard)/verification/rerun-button";
 import { statusInfo } from "@/lib/ui-text";
 import { resolveProjectIdsForUser, resolveProjectId } from "@/lib/verification/context";
 import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
@@ -12,8 +12,6 @@ import { scopeForPrincipal } from "@/lib/auth/scope";
 import { getPool, ensureDb, hasDatabase } from "@/lib/db";
 import type { VerificationRecord } from "@/types/verification";
 import type { Investigation } from "@/types/investigation";
-
-export const dynamic = "force-dynamic";
 
 type ProjectMeta = { id: string; name: string; repo: string | null };
 
@@ -106,7 +104,7 @@ function infraCause(record: VerificationRecord): { cause: string; next: string }
   return { cause: "The check could not start or finish. The available evidence does not confirm an application issue.", next: "Review technical details, check runner/setup status, and run the check again when the environment is ready." };
 }
 
-export default async function VerificationLabPage() {
+export default async function VerificationSection() {
   const principal = await getServerPrincipal();
   const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
 

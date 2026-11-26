@@ -1,9 +1,8 @@
-﻿import Link from "next/link";
+import Link from "next/link";
 import { PageHeader, Panel, EmptyState, WorkflowStrip } from "@/components/ui/Primitives";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { getCurrentPipelineState } from "@/lib/pipeline";
 import { readVerificationRecords, summarizeOutcome } from "@/lib/verification/store";
-import { readStories } from "@/lib/stories/store";
 import { readRuns } from "@/lib/agent/runs";
 import { readInvestigations } from "@/lib/investigations/store";
 import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
@@ -14,8 +13,8 @@ import { resolveProjectIdsForUser } from "@/lib/verification/context";
 import { resolveSelectedProjectId, recordVisibleInContext } from "@/lib/command-center/context";
 import { stageDetail, stageLabel, statusInfo } from "@/lib/ui-text";
 import { getPool, ensureDb, hasDatabase } from "@/lib/db";
-import { RunPipelineButton } from "./run-button";
-import { ObserveButton } from "./observe-button";
+import { RunPipelineButton } from "@/app/(dashboard)/command-center/run-button";
+import { ObserveButton } from "@/app/(dashboard)/command-center/observe-button";
 
 export const dynamic = "force-dynamic";
 
@@ -77,7 +76,7 @@ function severityTone(severity: string | null | undefined): string {
   }
 }
 
-export default async function CommandCenterPage({
+export async function CommandCenterSection({
   searchParams,
 }: {
   searchParams?: Promise<Record<string, string | string[] | undefined>>;
@@ -94,13 +93,12 @@ export default async function CommandCenterPage({
   const selectedProject = selectedProjectId === "all" ? null : visibleProjects.find((p) => p.id === selectedProjectId) || { id: selectedProjectId, name: "Project", slug: selectedProjectId, repo: null };
   const context = { selectedProjectId, visibleProjectIds: fallbackVisibleIds, allowLegacy };
 
-  const [pipeline, allVerifications, stories, runs, obsStatus, globalObservedEvents, investigations, projectObservedEvents] = await Promise.all([
+  const [pipeline, allVerifications, runs, obsStatus, globalObservedEvents, investigations, projectObservedEvents] = await Promise.all([
     getCurrentPipelineState(),
     readVerificationRecords({
       requestedBy: scope.privileged ? undefined : principal.userId,
       includeLegacy: allowLegacy,
     }),
-    readStories(scope),
     readRuns(scope),
     getObservationStatus({ privileged: !!scope.privileged }),
     (scope.privileged ? readObservedEvents({ privileged: true, system: true }).catch(() => []) : Promise.resolve([])),
@@ -115,12 +113,10 @@ export default async function CommandCenterPage({
 
   const verifications = allVerifications.filter((v) => recordVisibleInContext(v, context));
   const scopedInvestigations = investigations.filter((i) => recordVisibleInContext(i, context));
-  const scopedStories = stories.filter((s) => recordVisibleInContext({ projectId: (s as { projectId?: string }).projectId }, context));
   const observedEvents = selectedProjectId === "all" ? globalObservedEvents : projectObservedEvents;
 
   const summary = summarizeOutcome(verifications);
   const latestVerification = verifications[0];
-  const drafts = scopedStories.filter((s) => s.status === "review" || s.status === "draft");
   const latestRun = runs[0];
   const recentEvents = observedEvents.slice(0, 6);
   const recentRuns = runs.slice(0, 5);
@@ -177,15 +173,6 @@ export default async function CommandCenterPage({
         detail: `KAGURA found an issue that needs attention: "${top.title}". Review the evidence and use the fix prompt when you are ready.`,
         href: "/verification",
         cta: "See evidence",
-        useRunButton: false,
-      };
-    }
-    if (drafts.length > 0) {
-      return {
-        title: "Review your draft",
-        detail: "A draft is ready for you. Read it, make changes if needed, and publish only when it reflects real evidence.",
-        href: "/editorial",
-        cta: "Review drafts",
         useRunButton: false,
       };
     }
@@ -405,7 +392,6 @@ export default async function CommandCenterPage({
             </div>
           </div>
           <div className="mt-4 space-y-2 text-xs text-muted">
-            <div className="flex items-center justify-between gap-3"><span>Drafts waiting for review</span><span className="text-fg font-medium">{drafts.length}</span></div>
             <div className="flex items-center justify-between gap-3"><span>Recent observed changes</span><span className="text-fg font-medium">{recentEvents.length}</span></div>
             <div className="flex items-center justify-between gap-3"><span>Latest test outcome</span><span className="text-fg font-medium">{statusInfo(latestOutcome).label}</span></div>
           </div>
@@ -566,7 +552,7 @@ export default async function CommandCenterPage({
           </div>
         </Panel>
 
-        <Panel title="Workflow" description="The six-stage intelligence workflow KAGURA follows.">
+        <Panel title="Workflow" description="The six-stage agent workflow KAGURA follows.">
           <WorkflowStrip current={pipeline.stage} />
           <div className="mt-4 rounded-lg border border-border bg-panel-2/20 p-4">
             <div className="text-xs uppercase tracking-[0.12em] text-muted">Current stage</div>

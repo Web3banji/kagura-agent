@@ -5,8 +5,6 @@ import { getObservationStatus } from "@/lib/github/observe";
 import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
 import { scopeForPrincipal } from "@/lib/auth/scope";
 
-export const dynamic = "force-dynamic";
-
 const INTEGRATIONS = [
   {
     name: "GitHub",
@@ -33,7 +31,7 @@ const INTEGRATIONS = [
   },
 ];
 
-export default async function IntegrationsPage() {
+export default async function IntegrationsSection() {
   const principal = await getServerPrincipal();
   const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
   const obs = await getObservationStatus({ privileged: !!scope.privileged });
@@ -45,7 +43,7 @@ export default async function IntegrationsPage() {
         subtitle="Connect KAGURA to your project tools. Only real, authenticated connections are shown."
       />
 
-      <Panel title="GitHub" description="Source of project updates for checks and stories.">
+      <Panel title="GitHub" description="Source of project updates for checks and reports.">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 items-start">
           <div>
             <div className="text-sm font-medium text-fg">Connection</div>
@@ -90,4 +88,3 @@ export default async function IntegrationsPage() {
     </div>
   );
 }
-

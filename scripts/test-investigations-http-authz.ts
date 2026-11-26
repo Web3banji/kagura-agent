@@ -37,7 +37,7 @@ function rec(over: any = {}) {
 }
 
 async function main() {
-  const mod = await import('../src/app/api/investigations/[[...path]]/route.ts');
+  const mod = await import('../src/app/api/investigations/[[...path]]/handler.ts');
   async function call(method: 'GET'|'POST'|'PATCH', pathArr: string[], body: any, p: any, query='') {
     (globalThis as any).__testPrincipal = p;
     const url = 'http://localhost/api/investigations' + (pathArr.length ? '/' + pathArr.join('/') : '') + query;

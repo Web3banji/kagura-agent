@@ -91,7 +91,7 @@ export default function OnboardingPage() {
               <li>Create or select a project.</li>
               <li>Check for changes on the Overview page.</li>
               <li>Run a verification to test your app.</li>
-              <li>Review and publish a story.</li>
+              <li>Review verification evidence.</li>
             </ol>
           </Panel>
         </>

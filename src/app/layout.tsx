@@ -16,7 +16,7 @@ const geistMono = localFont({
 export const metadata: Metadata = {
   title: "KAGURA",
   description:
-    "KAGURA is an autonomous development agent that verifies its work with Kane CLI and publishes factual stories about its own evolution.",
+    "KAGURA is an autonomous development agent that verifies its work with Kane CLI and publishes factual reports about its own evolution.",
   icons: {
     icon: "/brand/chibi-wagasa-anime-emblem.png",
     apple: "/brand/chibi-wagasa-anime-emblem.png",

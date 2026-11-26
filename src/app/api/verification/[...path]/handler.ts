@@ -11,7 +11,7 @@ import type { VerificationRecord } from "@/types/verification";
 export const dynamic = "force-dynamic";
 
 const FLOW_OBJECTIVE =
-  'Go to the provided URL. Verify the page shows "KAGURA" and "Home & status". Click the "Activity history" link in the sidebar navigation and verify the Activity history page is displayed. Click the "Checks & tests" link in the sidebar navigation and verify the Checks & tests page is displayed. Click the "Published stories" link in the sidebar navigation and verify the Stories page is displayed. Return to "Home & status" and verify it is displayed.';
+  'Go to the provided URL. Verify the page shows "KAGURA" and "Home & status". Click the "Activity history" link in the sidebar navigation and verify the Activity history page is displayed. Click the "Checks & tests" link in the sidebar navigation and verify the Checks & tests page is displayed. Click the "Reports" link in the sidebar navigation and verify the Reports page is displayed. Return to "Home & status" and verify it is displayed.';
 
 async function handleJobs(req: Request) {
   const principal = (await getRequestPrincipal(req));

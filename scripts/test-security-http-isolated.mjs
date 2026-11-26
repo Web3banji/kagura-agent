@@ -244,7 +244,6 @@ async function main() {
     await assertRouteExists('GET /api/investigations', 'GET', `${base}/api/investigations`, hA, undefined, [200]);
     await assertRouteExists('POST /api/investigations', 'POST', `${base}/api/investigations`, hA, { title: 'probe', technicalExplanation: 't', simpleExplanation: 's', projectId: projectA, severity: 'low', status: 'open' }, [201]);
     await assertRouteExists('GET /api/agent/status', 'GET', `${base}/api/agent/status`, hA, undefined, [200]);
-    await assertRouteExists('GET /api/editorial', 'GET', `${base}/api/editorial`, hA, undefined, [200]);
     await assertRouteExists('POST /api/runner/claim', 'POST', `${base}/api/runner/claim`, hNone, {}, [401]); // route exists, auth required
     await assertRouteExists('POST /api/runner/complete', 'POST', `${base}/api/runner/complete`, hNone, { jobId: 'missing' }, [401]);
     await assertRouteExists('GET /api/github/observe', 'GET', `${base}/api/github/observe`, hA, undefined, [200]);
@@ -335,12 +334,6 @@ async function main() {
     const agentStatusA = await req('GET', `${base}/api/agent/status`, hA);
     check('A GET /api/agent/status returns 200', agentStatusA.status === 200, `got ${agentStatusA.status}`);
     check('A agent status has runs array', Array.isArray(agentStatusA.json?.runs), `body=${agentStatusA.text.slice(0,120)}`);
-
-    // --- Editorial ---
-    const editorialA = await req('GET', `${base}/api/editorial`, hA);
-    check('A GET /api/editorial returns 200', editorialA.status === 200, `got ${editorialA.status}`);
-    const editorialB = await req('GET', `${base}/api/editorial`, hB);
-    check('B GET /api/editorial returns 200', editorialB.status === 200, `got ${editorialB.status}`);
 
     // --- Runner auth (exact 401, route exists) ---
     const claimNoAuth = await req('POST', `${base}/api/runner/claim`, hNone, {});

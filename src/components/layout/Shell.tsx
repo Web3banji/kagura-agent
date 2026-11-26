@@ -15,15 +15,12 @@ type NavItem = {
 const WORKSPACE_NAV: NavItem[] = [
   { href: "/command-center", label: "Overview", hint: "What’s happening and what to do next" },
   { href: "/projects", label: "Projects", hint: "Your authorized projects" },
-  { href: "/journal", label: "Activity", hint: "Project changes and events" },
-  { href: "/editorial", label: "Intelligence", hint: "Drafts, review, and publishing" },
   { href: "/verification", label: "Verification", hint: "Checks and test results" },
   { href: "/reports", label: "Reports", hint: "Project reports" },
 ];
 
 const MANAGE_NAV: NavItem[] = [
   { href: "/integrations", label: "Integrations", hint: "Connect project tools" },
-  { href: "/team", label: "Team", hint: "Workspace members" },
   { href: "/settings", label: "Settings", hint: "Connections and preferences" },
 ];
 
@@ -88,7 +85,7 @@ export function Shell({
               />
               <div>
                 <div className="font-tech text-xs tracking-[0.24em] text-accent uppercase">KAGURA</div>
-                <div className="mt-0.5 text-sm text-fg font-semibold tracking-tight">Project Intelligence</div>
+                <div className="mt-0.5 text-sm text-fg font-semibold tracking-tight">Project Workspace</div>
               </div>
             </div>
           </Link>
@@ -190,7 +187,6 @@ export function Shell({
           <span className="font-tech text-xs tracking-[0.22em] text-accent uppercase">KAGURA</span>
         </Link>
         <div className="flex items-center gap-2">
-          <Link href="/stories" className="font-tech text-[11px] uppercase tracking-[0.14em] text-muted hover:text-fg border border-border rounded px-2 py-1">Stories</Link>
         </div>
       </header>
 

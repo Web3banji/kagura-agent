@@ -163,7 +163,7 @@ flowchart TD
 | Investigations | Processor and store | `src/lib/investigations` |
 | Runner | Local Kane execution | `scripts/kane-runner.mjs` |
 | AI | Server-side Gemini integration | `src/lib/ai` |
-| Stories/editorial | Drafts and publication | `src/lib/stories` |
+| Reports | Published report records | `src/lib/stories` |
 
 ## Codebase Structure
 
@@ -184,7 +184,6 @@ flowchart TD
 - `POST /api/runner/claim` — claim runner job
 - `POST /api/runner/heartbeat` — heartbeat
 - `POST /api/runner/complete` — complete job
-- `POST /api/editorial/publish` — publish draft
 
 All endpoints require authentication and enforce ownership where applicable.
 

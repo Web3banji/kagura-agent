@@ -59,9 +59,6 @@ export function AppShell({
             <span className="font-tech text-xs tracking-[0.22em] text-accent uppercase">KAGURA</span>
           </Link>
           <div className="flex items-center gap-2">
-            <Link href="/stories" className="font-tech text-[11px] uppercase tracking-[0.14em] text-muted hover:text-fg border border-border rounded px-2 py-1">
-              Stories
-            </Link>
             <Button variant="ghost" size="sm" onClick={toggleTheme} className="text-[10px] w-auto px-2 py-1.5">
               {theme === "light" ? "Dark mode" : "Light mode"}
             </Button>

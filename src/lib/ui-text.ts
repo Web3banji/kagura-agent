@@ -5,8 +5,8 @@ export const PIPELINE_STEPS = [
   { id: "ANALYSE", label: "Understand changes", detail: "Figures out what changed and what matters." },
   { id: "VERIFY", label: "Test the project", detail: "Runs real checks to see if things work as expected." },
   { id: "WRITE", label: "Explain findings and generate resolution prompts", detail: "Creates explanations and fix prompts from real evidence." },
-  { id: "DRAFT", label: "Create intelligence drafts", detail: "Prepares intelligence drafts from verified evidence." },
-  { id: "PUBLISH", label: "Publish", detail: "Makes the approved story visible on the Stories page." },
+  { id: "DRAFT", label: "Prepare report content", detail: "Prepares report content from verified evidence." },
+  { id: "PUBLISH", label: "Publish", detail: "Makes the approved report available in Reports." },
 ] as const;
 
 export function stageLabel(stage: string): string {

@@ -9,10 +9,8 @@ import { resolveProjectId } from "@/lib/verification/context";
 import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
 import { scopeForPrincipal } from "@/lib/auth/scope";
 import { hasDatabase } from "@/lib/db";
-import { GitHubConfigForm } from "./github-config-form";
-import { ObserveAction } from "./observe-action";
-
-export const dynamic = "force-dynamic";
+import { GitHubConfigForm } from "@/app/(dashboard)/settings/github-config-form";
+import { ObserveAction } from "@/app/(dashboard)/settings/observe-action";
 
 type ServiceState = "Configured" | "Not configured" | "Recently active" | "Processing" | "Waiting for heartbeat" | "Needs attention" | "Unavailable" | "Blocked" | "Not tested" | "KANE CLI unavailable" | "KANE auth required" | "Browser prerequisites unavailable" | "Isolation unavailable";
 
@@ -61,8 +59,7 @@ function ConfigRow({ label, value, detail }: { label: string; value: string; det
   );
 }
 
-
-export default async function SettingsPage() {
+export default async function SettingsSection() {
   const principal = await getServerPrincipal();
   const projectId = await resolveProjectId();
   const allowLegacy = !principal.userId || principalHasLegacyAccess(principal);
@@ -146,7 +143,7 @@ export default async function SettingsPage() {
             <div className="rounded-lg border border-border/70 bg-bg/20 p-3"><div className="font-medium text-fg">Authentication</div><div className="mt-1 text-xs">Session-based user access is enforced server-side. Admin-token infrastructure access is separate and token values are never shown.</div></div>
             <div className="rounded-lg border border-border/70 bg-bg/20 p-3"><div className="font-medium text-fg">Admin protection</div><div className="mt-1 text-xs">{adminTokenConfigured ? "An admin token/password is configured on the server." : "No admin token/password is configured. In production, protected admin access should be configured by an operator."}</div></div>
             <div className="rounded-lg border border-border/70 bg-bg/20 p-3"><div className="font-medium text-fg">Runner access</div><div className="mt-1 text-xs">Runner API uses a separate server-configured `KAGURA_RUNNER_TOKEN`. The token value is not displayed. Runner endpoints remain authorization-protected.</div></div>
-            <div className="rounded-lg border border-border/70 bg-bg/20 p-3"><div className="font-medium text-fg">Public vs private</div><div className="mt-1 text-xs">Published stories are public. Dashboard, settings, verification, intelligence, and management actions remain protected by existing auth controls.</div></div>
+            <div className="rounded-lg border border-border/70 bg-bg/20 p-3"><div className="font-medium text-fg">Public vs private</div><div className="mt-1 text-xs">Dashboard, settings, verification, and management actions remain protected by existing auth controls.</div></div>
           </div>
         </Panel>
       </div>
@@ -168,7 +165,7 @@ export default async function SettingsPage() {
           </div>
 
           <div className="rounded-xl border border-border bg-bg/20 p-4 space-y-3">
-            <div className="flex items-center justify-between gap-2"><div><div className="text-sm font-medium text-fg">AI provider</div><div className="text-xs text-muted">Used for drafting assistance. Drafts must remain grounded in real evidence.</div></div><StatePill state={aiState} /></div>
+            <div className="flex items-center justify-between gap-2"><div><div className="text-sm font-medium text-fg">AI provider</div><div className="text-xs text-muted">Used for drafting assistance. Generated content must remain grounded in real evidence.</div></div><StatePill state={aiState} /></div>
             <div className="grid gap-2 sm:grid-cols-2 text-xs text-muted">
               <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Provider</div><div className="mt-1 text-fg/90">{ai.configured ? ai.provider || "Configured" : "Not configured"}</div></div>
               <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Model</div><div className="mt-1 text-fg/90">{process.env.AI_MODEL ? process.env.AI_MODEL : "Default / provider-managed"}</div></div>
@@ -208,7 +205,7 @@ export default async function SettingsPage() {
           <div className="space-y-3">
             <div className="rounded-lg border border-border/70 bg-bg/20 p-3">
               <div className="text-sm font-medium text-fg">Publishing control</div>
-              <p className="mt-1 text-xs text-muted">Publishing is manual and already implemented: drafts are published only through explicit review/publish actions in Intelligence. No automatic publishing toggle is exposed because it is not implemented.</p>
+              <p className="mt-1 text-xs text-muted">Publishing is manual and already implemented: report records are published only through explicit review/publish actions. No automatic publishing toggle is exposed because it is not implemented.</p>
             </div>
             <div className="rounded-lg border border-border/70 bg-bg/20 p-3">
               <div className="text-sm font-medium text-fg">Notifications</div>

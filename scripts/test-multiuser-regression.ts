@@ -326,37 +326,9 @@ async function main() {
       assert.equal(r.status, 403);
     });
 
-    check("publishing another user's story is rejected", async () => {
-      const bStory = storyFor(bob.userId, bob.userId);
-      await upsertStory(bStory, userScope(bob.userId, false));
-      const r = await fetch("http://localhost/api/editorial/publish", {
-        method: "POST",
-        body: JSON.stringify({ id: bStory.id }),
-        headers: { Cookie: alice.cookie, "Content-Type": "application/json" },
-      });
-      assert.equal(r.status, 404, "publishing another user's story must not succeed");
-    });
-
-    check("regenerating another user's story is rejected", async () => {
-      const bStory = storyFor(bob.userId, bob.userId);
-      await upsertStory(bStory, userScope(bob.userId, false));
-      const r = await fetch("http://localhost/api/editorial/regenerate", {
-        method: "POST",
-        body: JSON.stringify({ id: bStory.id }),
-        headers: { Cookie: alice.cookie, "Content-Type": "application/json" },
-      });
-      assert.equal(r.status, 404, "regenerating another user's story must not succeed");
-    });
-
     check("unauthenticated requests are rejected", async () => {
       const r = await fetch("http://localhost/api/verification/jobs", { method: "GET" });
       assert.equal(r.status, 401);
-      const r2 = await fetch("http://localhost/api/editorial/publish", {
-        method: "POST",
-        body: JSON.stringify({ id: "x" }),
-        headers: { "Content-Type": "application/json" },
-      });
-      assert.equal(r2.status, 401);
     });
 
     check("invalid session is rejected", async () => {

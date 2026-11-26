@@ -14,7 +14,7 @@ function slugify(value: string): string { return value.trim().toLowerCase().repl
 function fmtDate(value?: string | null): string { if (!value) return "Not yet"; const d = new Date(value); if (Number.isNaN(d.getTime())) return "Not yet"; return d.toLocaleString(); }
 function isConnectedRepo(repo: ProjectRepo): boolean { return !!repo && repo.status !== "revoked" && repo.status !== "error"; }
 
-export default function ProjectsPage() {
+export default function ProjectsSection() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [repos, setRepos] = useState<DiscoveredRepo[]>([]);
   const [reposLoading, setReposLoading] = useState(true);

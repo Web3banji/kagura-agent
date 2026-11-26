@@ -20,7 +20,7 @@ export function RunPipelineButton() {
         setIsError(true);
         setMsg(data.error || "Something went wrong. Please try again.");
       } else if (data.draft) {
-        setMsg(`Draft ready to review: "${data.draft.title}". Open "Review drafts" to edit, approve, or publish it.`);
+        setMsg(`Report ready to review: "${data.draft.title}". Open "Reports" to review the published report.`);
       } else {
         setMsg(data.state?.note || "Run finished. Check the status below for details.");
       }

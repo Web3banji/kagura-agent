@@ -8,8 +8,6 @@ import { Button } from "../ui/elements";
 const NAV = [
   { href: "/command-center", label: "Overview", hint: "What KAGURA is and how to start" },
   { href: "/projects", label: "Projects", hint: "Your authorized projects" },
-  { href: "/journal", label: "Activity", hint: "Chronological project events" },
-  { href: "/editorial", label: "Intelligence", hint: "Drafts, review, and publishing" },
   { href: "/verification", label: "Verification", hint: "Checks and test results" },
   { href: "/reports", label: "Reports", hint: "Published report library" },
   { href: "/settings", label: "Settings", hint: "Account and preferences" },
@@ -69,7 +67,7 @@ export function Sidebar({ currentUser = null }: { currentUser?: ShellUser }) {
             />
             <div>
               <div className="font-tech text-xs tracking-[0.24em] text-accent uppercase">KAGURA</div>
-              <div className="mt-0.5 text-sm text-fg font-semibold tracking-tight">Project Intelligence</div>
+              <div className="mt-0.5 text-sm text-fg font-semibold tracking-tight">Project Workspace</div>
             </div>
           </div>
         </Link>
