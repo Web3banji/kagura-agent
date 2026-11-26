@@ -4,7 +4,7 @@ import path from "path";
 import { AccessDeniedError } from "@/lib/auth/scope";
 import type { VerificationJob, VerificationJobResult, VerificationJobStatus, VerificationOutcome, VerificationRecord } from "@/types/verification";
 import { readVerificationRecords } from "./store";
-import { getJob, updateJob } from "./jobs";
+import { getJob, resolvePersistedJobOwner, updateJob } from "./jobs";
 
 const DATA_DIR = path.join(process.cwd(), "data", "verification");
 const RECORDS_FILE = path.join(DATA_DIR, "records.json");
@@ -84,7 +84,12 @@ function rowToJobLite(row: Record<string, unknown>): VerificationJob {
   const payload = (row.payload || {}) as Partial<VerificationJob>;
   return {
     id: String(row.id), status: String(row.status) as VerificationJobStatus, flow: String(payload.flow || ""), objective: String(payload.objective || ""), url: String(payload.url || ""),
-    projectId: String(row.project_id || payload.projectId || ""), requestedBy: String(row.requested_by || payload.requestedBy || ""),
+    projectId: String(row.project_id || payload.projectId || ""), requestedBy: resolvePersistedJobOwner(row),
+    repositoryConnectionId: payload.repositoryConnectionId,
+    repositoryOwner: payload.repositoryOwner,
+    repositoryName: payload.repositoryName,
+    repositoryFullName: payload.repositoryFullName,
+    repositoryDefaultBranch: payload.repositoryDefaultBranch,
     chromeProfile: payload.chromeProfile, headless: payload.headless, timeout: payload.timeout, reason: payload.reason,
     createdAt: row.created_at ? new Date(String(row.created_at)).toISOString() : String(payload.createdAt || nowIso()),
     updatedAt: row.updated_at ? new Date(String(row.updated_at)).toISOString() : payload.updatedAt,
@@ -119,7 +124,7 @@ async function completeJobAtomicallyDb(input: CompletionInput): Promise<Completi
     const currentGeneration = typeof row.claim_generation === "number" ? row.claim_generation : Number(row.claim_generation || 0);
     const currentRecordId = row.record_id ? String(row.record_id) : undefined;
     const currentProjectId = String(row.project_id || "") || null;
-    const currentOwner = String(row.requested_by || "") || null;
+    const currentOwner = resolvePersistedJobOwner(row) || null;
 
     const terminalSame = (currentStatus === jobStatus && currentClaimedBy === runnerId && currentGeneration === claimGeneration && currentRecordId === expectedRecordId);
     if (terminalSame) {

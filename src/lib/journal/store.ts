@@ -84,7 +84,8 @@ export async function appendJournalEvent(event: JournalEvent): Promise<void> {
   if (!canUseLocalFs()) {
     throw new Error("Durable journal storage is not configured (DATABASE_URL missing in production).");
   }
-  const events = await readJournalEvents();
+  const events = await readJournalEvents({ privileged: true });
   events.unshift(event);
+  await fs.mkdir(path.dirname(EVENTS_FILE), { recursive: true });
   await fs.writeFile(EVENTS_FILE, JSON.stringify(events, null, 2), "utf8");
 }

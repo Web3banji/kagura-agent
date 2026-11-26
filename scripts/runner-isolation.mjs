@@ -102,12 +102,22 @@ export function assessIsolation(config, probe) {
         reason: "Required runner executable access is not confirmed for the sandbox account (fail closed).",
       };
     }
+    if (probe.passwordAvailable !== true) {
+      return {
+        ok: false,
+        mode: "account",
+        reason: "Sandbox password is not available to the runner (fail closed).",
+      };
+    }
     return {
       ok: true,
       mode: "account",
       sandboxUser: config.sandboxUser,
       reason: `OS-level isolation active as "${config.sandboxUser}" (host boundary; not per-job/user OS isolation).`,
-      limitations: ["single sandbox account provides host boundary, not per-job/user OS isolation"],
+      limitations: [
+        "single sandbox account provides host boundary, not per-job/user OS isolation",
+        "concurrent jobs under the same sandbox account can access one another's workspaces, profiles, and temporary files",
+      ],
     };
   }
   return { ok: false, mode, reason: `Unknown isolation mode: ${mode}` };
@@ -186,21 +196,21 @@ export async function probeIsolation(config, exec = defaultExec) {
 
   const secretFiles = Array.isArray(config.secretFiles) ? config.secretFiles.filter(Boolean) : [];
   const requiredExecutables = Array.isArray(config.requiredExecutables) ? config.requiredExecutables.filter(Boolean) : [];
-  const [accountRes, groupRes, aclRes, secretAclRes, exeRes] = await Promise.all([
+  const [accountRes, groupRes, aclResults, secretAclResults, exeResults] = await Promise.all([
     exec("net", ["user", config.sandboxUser]),
     exec("net", ["localgroup", "Administrators", config.sandboxUser]),
-    exec("icacls", [config.workspacesRoot, config.profilesRoot]),
-    secretFiles.length ? exec("icacls", secretFiles) : Promise.resolve({ code: 0, stdout: "ok" }),
-    requiredExecutables.length ? exec("icacls", requiredExecutables) : Promise.resolve({ code: 0, stdout: config.sandboxUser }),
+    Promise.all([config.workspacesRoot, config.profilesRoot].map((p) => exec("icacls", [p]))),
+    secretFiles.length ? Promise.all(secretFiles.map((f) => exec("icacls", [f]))) : Promise.resolve([]),
+    requiredExecutables.length ? Promise.all(requiredExecutables.map((f) => exec("icacls", [f]))) : Promise.resolve([]),
   ]);
 
   const accountExists = accountRes.code === 0 && String(accountRes.stdout).includes(config.sandboxUser);
   const isAdmin = groupRes.code === 0 && /completed successfully/i.test(String(groupRes.stdout));
-  const aclOk = aclRes.code === 0 && String(aclRes.stdout).includes(config.sandboxUser);
+  const aclOk = aclResults.every((r) => r.code === 0 && String(r.stdout).includes(config.sandboxUser));
   // Secret ACL probe is heuristic only: true presence of deny ACE cannot be fully proven from icacls text alone here.
   // Setup script must create backups/manifests and operator must verify; runner fail-closes when probe cannot confirm.
-  const secretAclOk = !secretFiles.length ? true : (secretAclRes.code === 0 && /den(y|ied)/i.test(String(secretAclRes.stdout)) ? true : false);
-  const executableOk = !requiredExecutables.length ? true : (exeRes.code === 0 && String(exeRes.stdout).toLowerCase().includes(String(config.sandboxUser).toLowerCase()));
+  const secretAclOk = !secretFiles.length ? true : secretAclResults.every((r) => r.code === 0 && /den(y|ied)/i.test(String(r.stdout)));
+  const executableOk = !requiredExecutables.length ? true : exeResults.every((r) => r.code === 0 && String(r.stdout).toLowerCase().includes(String(config.sandboxUser).toLowerCase()));
   return { accountExists, isAdmin, aclOk, secretAclOk, executableOk, probeLimitations: ["icacls text probes are heuristic; operator must verify ACLs and parent-directory permissions"] };
 }
 
@@ -214,6 +224,17 @@ export async function probeIsolation(config, exec = defaultExec) {
  * The password is read from `passwordFile` inside the script (never on the command
  * line); stdout/stderr are redirected to files inside the job workspace.
  */
+export function quoteWindowsArgument(value) {
+  const s = String(value ?? "");
+  if (!/[\s"]/.test(s)) return s;
+  const escaped = s.replace(/(\\*)"/g, '$1$1\\"');
+  return `"${escaped}"`;
+}
+
+function psSingleQuoted(value) {
+  return `'${String(value ?? "").replace(/'/g, "''")}'`;
+}
+
 export function buildSandboxSpawnCommand({
   nodeExe,
   cliEntry,
@@ -224,14 +245,16 @@ export function buildSandboxSpawnCommand({
   sandboxUser,
   passwordFile,
 }) {
+  if (!stdoutFile || !stderrFile) throw new Error("stdoutFile and stderrFile are required for sandboxed execution");
+  const argumentLine = [cliEntry, ...args].map(quoteWindowsArgument).join(" ");
   const psScript = [
     `$ErrorActionPreference = 'Stop'`,
-    `$sec = Get-Content -Raw ${JSON.stringify(passwordFile)} | ConvertTo-SecureString -AsPlainText -Force`,
-    `$cred = New-Object System.Management.Automation.PSCredential(${JSON.stringify(sandboxUser)}, $sec)`,
+    `$sec = Get-Content -Raw ${psSingleQuoted(passwordFile)} | ConvertTo-SecureString -AsPlainText -Force`,
+    `$cred = New-Object System.Management.Automation.PSCredential(${psSingleQuoted(sandboxUser)}, $sec)`,
     `$si = New-Object System.Diagnostics.ProcessStartInfo`,
-    `$si.FileName = ${JSON.stringify(nodeExe)}`,
-    `$si.Arguments = ${JSON.stringify([cliEntry, ...args].join(" "))}`,
-    `$si.WorkingDirectory = ${JSON.stringify(cwd)}`,
+    `$si.FileName = ${psSingleQuoted(nodeExe)}`,
+    `$si.Arguments = ${psSingleQuoted(argumentLine)}`,
+    `$si.WorkingDirectory = ${psSingleQuoted(cwd)}`,
     `$si.RedirectStandardOutput = $true`,
     `$si.RedirectStandardError = $true`,
     `$si.UseShellExecute = $false`,
@@ -239,7 +262,13 @@ export function buildSandboxSpawnCommand({
     `$si.UserName = $cred.UserName`,
     `$si.Password = $cred.Password`,
     `$p = [System.Diagnostics.Process]::Start($si)`,
+    `$outTask = $p.StandardOutput.ReadToEndAsync()`,
+    `$errTask = $p.StandardError.ReadToEndAsync()`,
     `$p.WaitForExit()`,
+    `$out = $outTask.GetAwaiter().GetResult()`,
+    `$err = $errTask.GetAwaiter().GetResult()`,
+    `[System.IO.File]::WriteAllText(${psSingleQuoted(stdoutFile)}, $out)`,
+    `[System.IO.File]::WriteAllText(${psSingleQuoted(stderrFile)}, $err)`,
     `[Console]::Out.Write($p.ExitCode)`,
   ].join("; ");
 

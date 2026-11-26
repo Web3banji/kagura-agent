@@ -7,7 +7,7 @@ import { Button, Input, Label, Notification, StatusBadge } from "@/components/ui
 
 type DiscoveredRepo = { githubRepoId: string; fullName: string; repoOwner: string; repoName: string; isPrivate: boolean | null };
 type ProjectRepo = { connectionId: string; fullName: string; owner: string; name: string; isPrivate: boolean | null; defaultBranch: string | null; status: string; linkStatus: string; linkedAt: string } | null;
-type Project = { id: string; owner_user_id: string; name: string; slug: string; is_bootstrap: boolean; created_at: string; updated_at: string; repository?: ProjectRepo };
+type Project = { id: string; owner_user_id: string; name: string; slug: string; targetUrl?: string | null; is_bootstrap: boolean; created_at: string; updated_at: string; repository?: ProjectRepo };
 type ProjectScanState = { status: "idle" | "running" | "success" | "error"; message?: string; lastRunAt?: string; lastResult?: { newCommits: number; failedRepositories: number; totalRepositories: number } };
 
 function slugify(value: string): string { return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, ""); }
@@ -33,6 +33,8 @@ export default function ProjectsSection() {
   const [scanStates, setScanStates] = useState<Record<string, ProjectScanState>>({});
   const [generalScan, setGeneralScan] = useState<ProjectScanState>({ status: "idle" });
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [targetUrlDraft, setTargetUrlDraft] = useState("");
+  const [savingTargetUrl, setSavingTargetUrl] = useState(false);
 
   const loadRepos = useCallback(async () => {
     setReposLoading(true); setReposError(null);
@@ -62,6 +64,21 @@ export default function ProjectsSection() {
 
   const selectedProject = useMemo(() => projects.find((p) => p.id === selectedProjectId) ?? null, [projects, selectedProjectId]);
   const selectedRepo = useMemo(() => repos.find((r) => r.githubRepoId === selectedRepoId) ?? null, [repos, selectedRepoId]);
+
+  useEffect(() => { setTargetUrlDraft(selectedProject?.targetUrl ?? ""); }, [selectedProject?.id, selectedProject?.targetUrl]);
+
+  async function saveTargetUrl() {
+    if (!selectedProject) return;
+    setSavingTargetUrl(true); setMsg(null);
+    try {
+      const res = await fetch("/api/projects", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: selectedProject.id, targetUrl: targetUrlDraft }) });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Could not save application target URL.");
+      setProjects((prev) => prev.map((p) => p.id === selectedProject.id ? { ...p, targetUrl: data.project?.targetUrl ?? null, updated_at: new Date().toISOString() } : p));
+      setMsg({ kind: "success", title: "Application target URL saved", message: "Repository-aware verification jobs will use this URL." });
+    } catch (e) { setMsg({ kind: "error", title: "Could not save application target URL", message: e instanceof Error ? e.message : "Please try again." }); }
+    finally { setSavingTargetUrl(false); }
+  }
 
   async function handleSelectRepo(repo: DiscoveredRepo) {
     setRegistering(true); setSelectedRepoId(repo.githubRepoId); setSelectedConnectionId(""); setMsg(null);
@@ -268,6 +285,7 @@ export default function ProjectsSection() {
               </div>
               <dl className="space-y-3 text-sm">
                 <div className="rounded-lg border border-border bg-panel-2/20 p-3"><dt className="text-xs uppercase tracking-[0.12em] text-muted">Assigned repository</dt><dd className="mt-1 font-medium text-fg break-all">{selectedProject.repository?.fullName || "No repository assigned"}</dd><dd className="mt-1 text-xs text-muted">{selectedProject.repository ? `GitHub repository ${selectedProject.repository.isPrivate ? "(private)" : "(public)"} · Default branch: ${selectedProject.repository.defaultBranch || "unknown"}` : "Assign a repository when creating a project to enable project-specific scans."}</dd></div>
+                <div className="rounded-lg border border-border bg-panel-2/20 p-3"><dt className="text-xs uppercase tracking-[0.12em] text-muted">Application target URL</dt><dd className="mt-1 text-xs text-muted">Repository-aware verification uses this trusted URL. HTTP and HTTPS only; credentials are not allowed.</dd><div className="mt-2 flex flex-col sm:flex-row gap-2"><Input value={targetUrlDraft} onChange={(e) => setTargetUrlDraft(e.target.value)} placeholder="https://app.example.com" disabled={savingTargetUrl} /><Button variant="outline" size="sm" onClick={() => void saveTargetUrl()} disabled={savingTargetUrl}>{savingTargetUrl ? "Saving..." : "Save URL"}</Button></div>{selectedProject.targetUrl ? <dd className="mt-1 text-xs text-emerald-300 break-all">Current: {selectedProject.targetUrl}</dd> : <dd className="mt-1 text-xs text-amber-300">No target URL configured. Repository-aware jobs are blocked until it is set.</dd>}</div>
                 <div className="rounded-lg border border-border bg-panel-2/20 p-3"><dt className="text-xs uppercase tracking-[0.12em] text-muted">What KAGURA monitors</dt><dd className="mt-1 text-sm text-fg/90 leading-relaxed">{selectedProject.repository ? "KAGURA can check this project's assigned repository for changes and run project-specific scans. General scans remain separate." : "KAGURA cannot run a project-specific repository scan until a repository is assigned."}</dd></div>
                 <div className="rounded-lg border border-border bg-panel-2/20 p-3"><dt className="text-xs uppercase tracking-[0.12em] text-muted">Recent checks and discoveries</dt><dd className="mt-1 text-sm text-fg/90">{scanStates[selectedProject.id]?.lastRunAt ? `Last project scan in this session: ${fmtDate(scanStates[selectedProject.id]?.lastRunAt)}` : "No project scan run in this session yet."}</dd><dd className="mt-1 text-xs text-muted leading-relaxed">{scanStates[selectedProject.id]?.message || "Run a project scan to check the assigned repository for new updates."}</dd></div>
               </dl>

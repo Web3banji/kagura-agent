@@ -142,12 +142,14 @@ export async function ensureDb(): Promise<void> {
           owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
           name TEXT NOT NULL,
           slug TEXT,
+          target_url TEXT,
           is_bootstrap BOOLEAN NOT NULL DEFAULT FALSE,
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS projects_owner_user_id_idx ON projects (owner_user_id);
         CREATE UNIQUE INDEX IF NOT EXISTS projects_slug_unique_idx ON projects (slug) WHERE slug IS NOT NULL;
+        ALTER TABLE projects ADD COLUMN IF NOT EXISTS target_url TEXT;
 
         CREATE TABLE IF NOT EXISTS oauth_states (
           state TEXT PRIMARY KEY,

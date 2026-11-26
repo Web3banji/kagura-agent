@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
 import { isRunnerAuthorized, runnerUnauthorized } from "@/lib/auth/runner";
-import { claimNextJob, countPendingJobs, getJob, markRunnerSuccess, getRunnerHeartbeat, recordHeartbeat } from "@/lib/verification/jobs";
+import { claimNextJob, countPendingJobs, getJob, updateJob, markRunnerSuccess, getRunnerHeartbeat, recordHeartbeat } from "@/lib/verification/jobs";
 import { completeJobAtomically } from "@/lib/verification/completion";
 import { AccessDeniedError } from "@/lib/auth/scope";
+import { authorizeRepositoryConnectionForToken, authorizeRepositoryToken, RepositoryContextError } from "@/lib/verification/repository-context";
+import { getRepositoryConnectionForUser } from "@/lib/repositories/connections";
+import { getUserGitHubAccessToken } from "@/lib/auth/users";
 import type { RunnerReadiness, RunnerReadinessState, VerificationJobResult, VerificationOutcome, VerificationRecord } from "@/types/verification";
 
 export const dynamic = "force-dynamic";
@@ -77,8 +80,10 @@ async function handleHeartbeatPost(req: Request) {
       note: typeof body.note === "string" ? body.note.slice(0, 300) : undefined,
       readiness,
     });
-    const pendingJobs = await countPendingJobs();
-    return NextResponse.json({ ...hb, pendingJobs });
+      const pendingJobs = await countPendingJobs();
+      const current = typeof body.currentJobId === "string" && body.currentJobId ? await getJob(body.currentJobId) : undefined;
+      const cancelJobId = current?.status === "cancelling" && current.claimedBy === (typeof body.runnerId === "string" ? body.runnerId : "") ? current.id : undefined;
+      return NextResponse.json({ ...hb, pendingJobs, cancelJobId });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
   }
@@ -104,11 +109,23 @@ async function handleComplete(req: Request) {
       return NextResponse.json({ error: "Job claim lease has expired" }, { status: 409 });
     }
     const owner = job.requestedBy?.trim() || "";
-    if (!owner) {
+    if (job.status !== "cancelling" && !owner) {
       return NextResponse.json({ error: "Job owner is missing; refusing to complete" }, { status: 409 });
     }
-    if (job.status !== "claimed" && job.status !== "running") {
+    if (job.status !== "claimed" && job.status !== "running" && job.status !== "cancelling") {
       return NextResponse.json({ error: "Job is not in a completable state", status: job.status }, { status: 409 });
+    }
+    if (job.status === "cancelling") {
+      if (body.cancelConfirmed !== true) {
+        return NextResponse.json({ error: "Cancellation termination is not confirmed; job remains cancelling", retryable: false }, { status: 409 });
+      }
+      const cancelled = await updateJob(
+        job.id,
+        { status: "cancelled", completedAt: new Date().toISOString(), error: job.error || "Cancelled by operator", leaseExpiresAt: undefined },
+        { expectedClaimedBy: statedRunnerId, expectedStatus: ["cancelling"], expectedClaimGeneration: job.claimGeneration ?? 0, requireActiveLease: false },
+      );
+      if (!cancelled) return NextResponse.json({ error: "Cancellation changed during finalization" }, { status: 409 });
+      return NextResponse.json({ ok: true, job: cancelled });
     }
     const runEnd = body.runEnd && typeof body.runEnd === "object" ? (body.runEnd as Record<string, unknown>) : undefined;
     const runEndStatus = runEnd?.status;
@@ -126,6 +143,8 @@ async function handleComplete(req: Request) {
       testUrl: typeof body.testUrl === "string" ? body.testUrl : typeof runEnd?.test_url === "string" ? String(runEnd.test_url) : undefined,
       sessionDir: typeof body.sessionDir === "string" ? body.sessionDir : typeof runEnd?.session_dir === "string" ? String(runEnd.session_dir) : undefined,
       ndjsonPath: typeof body.ndjsonPath === "string" ? body.ndjsonPath : undefined,
+      localContextPath: typeof body.localContextPath === "string" ? body.localContextPath : undefined,
+      localContextMissing: body.localContextMissing === true,
       runEnd,
       stderr: typeof body.stderr === "string" ? body.stderr : undefined,
       startedAt,
@@ -160,6 +179,8 @@ async function handleComplete(req: Request) {
       testUrl: result.testUrl,
       sessionDir: result.sessionDir,
       ndjsonPath: result.ndjsonPath,
+      localContextPath: result.localContextPath,
+      localContextMissing: result.localContextMissing,
       runEnd: result.runEnd,
       stderr: result.stderr,
       startedAt,
@@ -269,11 +290,77 @@ async function handleProcessingDrain(req: Request) {
   }
 }
 
+async function handleValidate(req: Request) {
+  if (!isRunnerAuthorized(req)) return runnerUnauthorized();
+  try {
+    const body = (await req.json().catch(() => ({}))) as { jobId?: string; runnerId?: string; claimGeneration?: number };
+    const jobId = typeof body.jobId === "string" ? body.jobId.trim() : "";
+    const runnerId = typeof body.runnerId === "string" ? body.runnerId.trim() : "";
+    if (!jobId || !runnerId) return NextResponse.json({ ok: false, error: "jobId and runnerId are required" }, { status: 400 });
+    const job = await getJob(jobId);
+    if (!job) return NextResponse.json({ ok: false, error: "Job not found" }, { status: 404 });
+    const generation = typeof body.claimGeneration === "number" ? body.claimGeneration : undefined;
+    if (job.claimedBy !== runnerId || (generation !== undefined && (job.claimGeneration ?? 0) !== generation)) {
+      return NextResponse.json({ ok: false, error: "Job claim changed" }, { status: 409 });
+    }
+    if (job.leaseExpiresAt && new Date(job.leaseExpiresAt).getTime() < Date.now()) {
+      return NextResponse.json({ ok: false, error: "Job claim lease has expired" }, { status: 409 });
+    }
+    if (job.status === "cancelling" || job.status === "cancelled") {
+      return NextResponse.json({ ok: false, cancelRequested: true, status: job.status }, { status: 409 });
+    }
+    if (job.status !== "claimed" && job.status !== "running") {
+      return NextResponse.json({ ok: false, error: "Job is not executable", status: job.status }, { status: 409 });
+    }
+    return NextResponse.json({ ok: true, job });
+  } catch (err) {
+    return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+  }
+}
+
+async function handleRepositoryToken(req: Request) {
+  if (!isRunnerAuthorized(req)) return runnerUnauthorized();
+  try {
+    const body = (await req.json().catch(() => ({}))) as { jobId?: string; runnerId?: string; claimGeneration?: number };
+    const jobId = typeof body.jobId === "string" ? body.jobId.trim() : "";
+    const runnerId = typeof body.runnerId === "string" ? body.runnerId.trim() : "";
+    const generation = typeof body.claimGeneration === "number" ? body.claimGeneration : undefined;
+    if (!jobId || !runnerId || generation === undefined) {
+      return NextResponse.json({ error: "jobId, runnerId and claimGeneration are required" }, { status: 400 });
+    }
+    const job = await getJob(jobId);
+    if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
+    authorizeRepositoryToken(job, runnerId, generation);
+    if (!job.requestedBy) return NextResponse.json({ error: "Job owner is missing" }, { status: 409 });
+    if (!job.repositoryConnectionId) {
+      return NextResponse.json({ error: "Job has no persisted repository connection" }, { status: 409 });
+    }
+    const connection = await getRepositoryConnectionForUser(job.repositoryConnectionId, job.requestedBy);
+    if (!connection) {
+      return NextResponse.json({ error: "Repository connection is not available for this job" }, { status: 409 });
+    }
+    authorizeRepositoryConnectionForToken(job, connection);
+    const token = await getUserGitHubAccessToken(job.requestedBy);
+    if (!token) return NextResponse.json({ error: "No GitHub credential is available for the job owner" }, { status: 401 });
+    return NextResponse.json(
+      { token, repoFullName: job.repositoryFullName, branch: job.repositoryDefaultBranch },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  } catch (err) {
+    if (err instanceof RepositoryContextError) {
+      return NextResponse.json({ error: err.message }, { status: err.status });
+    }
+    return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
+  }
+}
+
 export async function POST(req: Request, ctx: { params: { path?: string[] } }) {
   const path = (ctx.params.path || []).join("/");
   if (path === "claim") return handleClaim(req);
   if (path === "complete") return handleComplete(req);
   if (path === "heartbeat") return handleHeartbeatPost(req);
+  if (path === "validate") return handleValidate(req);
+  if (path === "repository-token") return handleRepositoryToken(req);
   if (path === "processing/drain") return handleProcessingDrain(req);
   if (path === "reconciliation/drain") return handleReconciliationDrain(req);
   return notFound();

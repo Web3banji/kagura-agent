@@ -244,7 +244,7 @@ check("assessment fails closed when the sandbox account is an administrator", ()
 check("assessment passes only for a non-admin account with ACLs", () => {
   const result = assessIsolation(
     { mode: "account", sandboxUser: "KAGURA_SANDBOX", workspacesRoot: "C:\\KaguraRunner\\workspaces", profilesRoot: "C:\\KaguraRunner\\profiles", repoRoot: "C:\\repo", isolateAllJobs: false },
-    { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: true, executableOk: true },
+    { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: true, executableOk: true, passwordAvailable: true },
   );
   assert.equal(result.ok, true);
   assert.equal(result.sandboxUser, "KAGURA_SANDBOX");

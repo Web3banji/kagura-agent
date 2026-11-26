@@ -52,6 +52,22 @@ function analyseCommits(commits: ObservedCommit[]): Analysis {
 
 export type RunPipelineOptions = { userId?: string | null; scope?: RecordScope; system?: false } | { system: true; userId?: string | null; scope: RecordScope & { privileged: true; includeLegacy: boolean } };
 
+export function resolvePipelineOwner(opts: RunPipelineOptions): string {
+  const scope = opts?.scope;
+  const scopeUser = typeof scope?.userId === "string" ? scope.userId.trim() : "";
+  const optsUser = typeof opts?.userId === "string" ? opts.userId.trim() : "";
+  if (!opts?.system) {
+    if (!scopeUser) throw new Error("Authenticated user scope is required for pipeline execution.");
+    if (optsUser && optsUser !== scopeUser) throw new Error("Pipeline user identity does not match the authenticated scope.");
+    return scopeUser;
+  }
+  if (!scope?.privileged) throw new Error("System pipeline execution requires explicit privileged scope.");
+  if (optsUser && scopeUser && optsUser !== scopeUser) throw new Error("System pipeline user identity does not match the privileged scope.");
+  const owner = optsUser || scopeUser;
+  if (!owner) throw new Error("System pipeline execution requires an authorized user identity.");
+  return owner;
+}
+
 export async function runPipeline(
   trigger: "manual" | "observe" = "manual",
   opts: RunPipelineOptions,
@@ -73,13 +89,21 @@ export async function runPipeline(
     }
   }
 
+  let owner: string;
+  try {
+    owner = resolvePipelineOwner(opts);
+  } catch (err) {
+    const state = await getCurrentPipelineState();
+    return { state, error: err instanceof Error ? err.message : String(err) };
+  }
+
   const active = await getActiveRun(scope);
   if (active) {
     const state = await getCurrentPipelineState();
     return { run: active, state, error: "An agent run is already in progress." };
   }
 
-  const run = await createRun(trigger, { userId: opts?.userId ?? scope.userId ?? null });
+  const run = await createRun(trigger, { userId: owner });
   const started = new Date().toISOString();
 
   async function fail(stage: AgentRun["currentStage"], msg: string, extra?: Partial<AgentRun>): Promise<RunResult> {
@@ -94,8 +118,8 @@ export async function runPipeline(
     await updateRun(run.id, { currentStage: "OBSERVE", stageUpdate: { stage: "OBSERVE", status: "running", note: "Fetching project-scoped repository activity..." } }, scope);
     await setPipelineState({ agentState: "running", stage: "OBSERVE", note: "Observing project-scoped repository activity...", lastRunAt: started, lastError: undefined });
 
-    const userId = opts?.userId ?? null;
-    const projectIds = scope?.userId ? await resolveProjectIdsForUser(scope.userId) : [];
+    const userId = owner;
+    const projectIds = await resolveProjectIdsForUser(userId);
     const projectId = projectIds.length > 0 ? projectIds[0] : undefined;
 
     let observation: Awaited<ReturnType<typeof observeProjectRepositories>>;
@@ -171,7 +195,7 @@ export async function runPipeline(
       await updateRun(run.id, { currentStage: "VERIFY", stageUpdate: { stage: "VERIFY", status: "running", note: `Running Kane verification (${analysis.flow})...` } }, scope);
       await setPipelineState({ stage: "VERIFY", note: `Running Kane verification (${analysis.flow}) against ${process.env.KAGURA_APP_URL || (process.env.KAGURA_APP_URL || process.env.KAGURA_APP_URL) || "http://localhost:3000"}...` });
       try {
-        verificationRecord = await verifyWithKane(analysis);
+        verificationRecord = await verifyWithKane(analysis, { requestedBy: owner });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         await updateRun(run.id, { verificationOutcome: "error" }, scope);

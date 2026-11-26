@@ -132,6 +132,7 @@ export function validateUrl(raw) {
     return { ok: false, reason: `unsupported url scheme: ${parsed.protocol}` };
   }
   if (!parsed.hostname) return { ok: false, reason: "url has no host" };
+  if (parsed.username || parsed.password) return { ok: false, reason: "url must not contain credentials" };
   return { ok: true, url: parsed.toString() };
 }
 

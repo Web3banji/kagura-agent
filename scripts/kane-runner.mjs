@@ -23,6 +23,7 @@ import {
   validateIsolationPaths,
 } from "./runner-isolation.mjs";
 import { workspaceDir, profileDir, isInside } from "./runner-workspace.mjs";
+import { cloneRepository, RepositoryCheckoutError } from "./runner-repository.mjs";
 import {
   buildChildEnv,
   validateJobForExecution,
@@ -75,6 +76,166 @@ function required(name) {
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+const MAX_RESPONSE_ERROR_LENGTH = 500;
+
+function redactSensitiveText(value) {
+  return String(value)
+    .replace(/Bearer\s+[^\s,;"']+/gi, "Bearer [REDACTED]")
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{20,}\b/g, "[REDACTED]")
+    .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, "[REDACTED]")
+    .replace(/([?&](?:token|access_token|api_key|apikey|password|secret|authorization)=)[^&\s]+/gi, "$1[REDACTED]")
+    .replace(/\b(token|password|secret|authorization|api[_-]?key|runner_token|database_url)\b\s*[:=]\s*[^\s,;}]+/gi, "$1=[REDACTED]")
+    .replace(/:\/\/[^/\s:@]+:[^/\s@]+@/g, "://[REDACTED]@");
+}
+
+export function extractSafeResponseError(data, maxLength = MAX_RESPONSE_ERROR_LENGTH) {
+  let detail;
+  if (typeof data === "string") {
+    detail = data;
+  } else if (data && typeof data === "object") {
+    const obj = data;
+    if (typeof obj.error === "string") detail = obj.error;
+    else if (typeof obj.raw === "string") detail = obj.raw;
+    else {
+      try { detail = JSON.stringify(obj); } catch { detail = undefined; }
+    }
+  }
+  if (!detail) return undefined;
+  const safe = redactSensitiveText(detail).replace(/\s+/g, " ").trim();
+  if (!safe) return undefined;
+  const limit = Number.isFinite(maxLength) && maxLength > 0 ? Math.floor(maxLength) : MAX_RESPONSE_ERROR_LENGTH;
+  if (safe.length <= limit) return safe;
+  return `${safe.slice(0, Math.max(0, limit - 3))}...`;
+}
+
+function httpFailureReason(res) {
+  const detail = extractSafeResponseError(res?.data);
+  if (detail) return `HTTP ${res.status}: ${detail}`;
+  return redactSensitiveText(res?.reason || `HTTP ${res.status}`);
+}
+
+function killProcessTree(child) {
+  if (!child || !child.pid) return;
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { shell: false, windowsHide: true, stdio: "ignore" }).on("error", () => {});
+    } else {
+      child.kill("SIGKILL");
+    }
+  } catch {}
+}
+
+export async function terminateProcessTree(child, opts = {}) {
+  const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : 5000;
+  const spawnFn = opts.spawnFn || spawn;
+  if (!child || !child.pid) return { ok: false, reason: "no_pid" };
+
+  const run = (command, args) =>
+    new Promise((resolve) => {
+      let settled = false;
+      let proc;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      };
+      const timer = setTimeout(() => {
+        try { proc?.kill?.("SIGKILL"); } catch {}
+        finish({ timedOut: true, code: null, stdout: "", stderr: `Timed out after ${timeoutMs}ms` });
+      }, timeoutMs);
+      try {
+        proc = spawnFn(command, args, { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+      } catch (err) {
+        finish({ timedOut: false, code: null, stdout: "", stderr: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      let stdout = "";
+      let stderr = "";
+      proc.stdout?.on("data", (d) => { stdout += d.toString(); });
+      proc.stderr?.on("data", (d) => { stderr += d.toString(); });
+      proc.on?.("error", (err) => finish({ timedOut: false, code: null, stdout, stderr: stderr || (err instanceof Error ? err.message : String(err)) }));
+      proc.on?.("close", (code, signal) => finish({ timedOut: false, code, signal, stdout, stderr }));
+    });
+
+  if (process.platform === "win32") {
+    const res = await run("taskkill", ["/PID", String(child.pid), "/T", "/F"]);
+    if (res.timedOut) return { ok: false, reason: "taskkill_timeout", timedOut: true };
+    if (res.code === 0) return { ok: true, reason: "taskkill_ok", exitCode: 0 };
+    if (res.code === 128) return { ok: false, reason: "process_missing", exitCode: 128, stderr: res.stderr };
+    return { ok: false, reason: "taskkill_failed", exitCode: res.code, stderr: res.stderr };
+  }
+
+  const descendants = await run("pkill", ["-TERM", "-P", String(child.pid)]);
+  try { child.kill("SIGKILL"); } catch {}
+  if (descendants.timedOut) return { ok: false, reason: "pkill_timeout", timedOut: true };
+  if (descendants.code !== 0 && descendants.code !== 1) {
+    return { ok: false, reason: "pkill_failed", exitCode: descendants.code, stderr: descendants.stderr };
+  }
+  return { ok: true, reason: "posix_tree_kill", exitCode: 0, descendantSignal: descendants.code };
+}
+
+export async function runProcess(command, args, { timeoutMs = 10000 } = {}) {
+  return new Promise((resolve) => {
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let child;
+    let timer;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    try {
+      child = spawn(command, args, { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      finish({ code: null, stdout, stderr: err instanceof Error ? err.message : String(err), timedOut: false });
+      return;
+    }
+    timer = setTimeout(() => {
+      killProcessTree(child);
+      finish({ code: null, stdout, stderr: stderr || `Timed out after ${timeoutMs}ms`, timedOut: true });
+    }, timeoutMs);
+    child.stdout?.on("data", (d) => { stdout += d.toString(); });
+    child.stderr?.on("data", (d) => { stderr += d.toString(); });
+    child.on("error", (err) => finish({ code: null, stdout, stderr: stderr || err.message, timedOut: false }));
+    child.on("close", (code, signal) => finish({ code, signal, stdout, stderr, timedOut: false }));
+  });
+}
+
+export async function prepareSandboxPasswordFile({
+  password,
+  sandboxUser,
+  pwFile,
+  writeFile = fs.writeFile,
+  removeFile = fs.rm,
+  run = runProcess,
+}) {
+  if (typeof password !== "string" || password.length === 0) {
+    throw new Error("sandbox password is unavailable");
+  }
+  if (!sandboxUser) throw new Error("sandbox user is unavailable");
+  try {
+    await writeFile(pwFile, password, { encoding: "utf8", mode: 0o600 });
+  } catch (err) {
+    await removeFile(pwFile, { force: true }).catch(() => {});
+    throw new Error(`sandbox password file could not be created: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const acl = await run("icacls", [pwFile, "/inheritance:r", "/grant:r", `${sandboxUser}:(R)`, "/grant:r", "SYSTEM:(R)"], { timeoutMs: 10000 });
+  if (acl.code !== 0 || acl.timedOut) {
+    await removeFile(pwFile, { force: true }).catch(() => {});
+    throw new Error(`sandbox password ACL protection failed: ${acl.stderr || acl.code || "unknown error"}`);
+  }
+  const verify = await run("icacls", [pwFile], { timeoutMs: 10000 });
+  if (verify.code !== 0 || verify.timedOut || !String(verify.stdout).toLowerCase().includes(sandboxUser.toLowerCase())) {
+    await removeFile(pwFile, { force: true }).catch(() => {});
+    throw new Error("sandbox password ACL verification failed");
+  }
+  return pwFile;
 }
 
 function redactUrl(u) {
@@ -215,12 +376,16 @@ function getIsolationConfig() {
 }
 
 let isolationAssessment = null;
+let isolationProbe = null;
 async function assessIsolationOnce(config) {
   if (isolationAssessment) return isolationAssessment;
   const requiredExecutables = [process.execPath];
   const kaneEntry = resolveKaneCliEntry();
   if (kaneEntry) requiredExecutables.push(kaneEntry);
-  isolationAssessment = assessIsolation(config, await probeIsolation({ ...config, requiredExecutables }));
+  const probe = await probeIsolation({ ...config, requiredExecutables });
+  const passwordAvailable = Boolean(config.sandboxPassword);
+  isolationProbe = { ...probe, passwordAvailable };
+  isolationAssessment = assessIsolation(config, isolationProbe);
   return isolationAssessment;
 }
 
@@ -258,6 +423,31 @@ function nextBackoff(current, max) {
   return Math.min(max, Math.floor(base * 1.8));
 }
 
+export function formatReadinessStatus(readiness, requiresIsolation, isolationState) {
+  const kane = `${readiness?.state || READINESS_STATES.UNKNOWN}/${readiness?.ready ? "ready" : "blocked"}`;
+  const isolation = requiresIsolation
+    ? `${isolationState?.ok ? "ready" : "blocked"}:${isolationState?.reason || "not_checked"}`
+    : "not_required";
+  const overall = readiness?.ready && (!requiresIsolation || isolationState?.ok) ? "ready" : "blocked";
+  return `kane=${kane} isolation=${isolation} overall=${overall}`;
+}
+
+export async function syncCompletionWithRetry(cfg, payload, attempt = 0, maxAttempts = 3, requestFn = apiRequest, sleepFn = sleep) {
+  let res;
+  try {
+    res = await requestFn(cfg, "POST", "/api/runner/complete", payload, 45000);
+  } catch (err) {
+    res = { status: 0, reason: err instanceof Error ? err.message : String(err) };
+  }
+  if (res.status >= 200 && res.status < 300) return { ok: true, status: res.status };
+  const nonRetriable = [400, 401, 403, 404, 409, 422].includes(res.status);
+  if (nonRetriable || attempt + 1 >= maxAttempts) {
+    return { ok: false, status: res.status, reason: httpFailureReason(res) };
+  }
+  await sleepFn(Math.min(5000, 500 * 2 ** attempt));
+  return syncCompletionWithRetry(cfg, payload, attempt + 1, maxAttempts, requestFn, sleepFn);
+}
+
 const SYNC_DIR = path.join(ROOT, "data", "verification", "pending-sync");
 
 async function enqueueSync(payload, reason) {
@@ -293,7 +483,7 @@ async function flushSyncQueue(cfg, runnerId) {
         // terminal/non-retriable for this payload; keep record for inspection by renaming
         const dead = `${full}.dead`;
         await fs.rename(full, dead).catch(() => {});
-        log(`KAGURA RUNNER: pending sync rejected as non-retriable (HTTP ${res.status}) for job ${item.payload.jobId}; kept for inspection`);
+        log(`KAGURA RUNNER: pending sync rejected as non-retriable (${httpFailureReason(res)}) for job ${item.payload.jobId}; kept for inspection`);
       } else {
         return { flushed, remaining: files.length - flushed };
       }
@@ -329,10 +519,10 @@ function mapOutcome(exitCode, runEndStatus) {
   return "blocked";
 }
 
-async function executeKaneJob(job, runnerId, onHeartbeat) {
+export async function executeKaneJob(job, runnerId, onHeartbeat, deps = {}) {
   const startedAt = new Date().toISOString();
 
-  function reject(summary) {
+  function reject(summary, extra = {}) {
     return {
       jobId: job?.id,
       runnerId,
@@ -342,21 +532,36 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
       summary,
       startedAt,
       finishedAt: new Date().toISOString(),
+      ...extra,
     };
   }
+
+  const onPreSpawn = deps.onPreSpawn;
+  const checkCancellable = async () => {
+    if (typeof onPreSpawn !== "function") return true;
+    return (await onPreSpawn(job)) === true;
+  };
 
   // 1) Validate every user-controlled field BEFORE any path is derived or process spawned.
   const validated = validateJobForExecution(job);
   if (!validated.ok) return reject(`Job rejected by runner validation: ${validated.reason}`);
+  if (!(await checkCancellable())) {
+    return reject("Execution aborted before spawn: cancellation requested or job is no longer claimable", {
+      cancelConfirmed: true,
+      termination: { ok: true, reason: "not_started" },
+    });
+  }
   const { objective, url, flow, timeout: timeoutSec, headless } = validated;
 
   // 2) OS-level isolation gate. Ordinary-user jobs (recorded requestedBy) may only
   // execute under a genuine OS boundary; platform/legacy jobs (no requestedBy) run
   // under the shared runner account exactly as before.
-  const isolation = getIsolationConfig();
+  const isolation = deps.isolation ?? getIsolationConfig();
   const requiresIsolation = requiresIsolationForJob(job, { isolateAllJobs: isolation.isolateAllJobs });
+  let activeAssessment = deps.assessment ?? null;
   if (requiresIsolation) {
-    const assessment = await assessIsolationOnce(isolation);
+    const assessment = activeAssessment ?? await (deps.assessIsolation ?? assessIsolationOnce)(isolation);
+    activeAssessment = assessment;
     if (!assessment.ok) {
       log(`Isolation not ready: ${assessment.reason}`);
       return reject(
@@ -403,6 +608,36 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
     return reject("Refusing to execute: could not derive a safe log path for this job.");
   }
 
+  let kaneCwd = jobCwd;
+  if (job.repositoryFullName) {
+    if (!job.repositoryDefaultBranch) {
+      return reject("Repository job has no persisted default branch; refusing to execute.");
+    }
+    if (typeof deps.isRepositoryTargetAllowed === "function" && !deps.isRepositoryTargetAllowed(url)) {
+      return reject("Repository job has no repository-specific target URL; refusing to verify the KAGURA app URL as a substitute.");
+    }
+    const tokenResult = typeof deps.getRepositoryToken === "function"
+      ? await deps.getRepositoryToken(job, runnerId)
+      : null;
+    if (!tokenResult?.token) {
+      return reject("Repository credential handoff failed; refusing to execute.");
+    }
+    const checkoutDir = path.join(jobCwd, "repo");
+    try {
+      const checkout = await (deps.cloneRepository || cloneRepository)({
+        repoFullName: job.repositoryFullName,
+        branch: job.repositoryDefaultBranch,
+        token: tokenResult.token,
+        checkoutDir,
+        timeoutMs: 120000,
+      });
+      kaneCwd = checkout.checkoutDir || checkoutDir;
+    } catch (err) {
+      const message = err instanceof RepositoryCheckoutError ? err.message : err instanceof Error ? err.message : String(err);
+      return reject(`Repository checkout failed: ${message}`);
+    }
+  }
+
   const name = `kagura-${flow}`;
 
   // Approved, fixed argument set only. No user value is ever used as a command name.
@@ -411,6 +646,21 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
   args.push("--timeout", String(timeoutSec));
   args.push("--name", name);
   args.push("--chrome-profile", profile);
+
+  let localContextPath = "";
+  let localContextMissing = false;
+  if (job.repositoryFullName) {
+    const candidate = path.join(kaneCwd, ".testmuai", "context.md");
+    try {
+      await fs.access(candidate);
+      localContextPath = candidate;
+      args.push("--local-context", candidate);
+      log(`Local context supplied for job ${job.id}: ${candidate}`);
+    } catch {
+      localContextMissing = true;
+      log(`Local context missing for job ${job.id}: ${candidate}; continuing with Kane default local-context behavior.`);
+    }
+  }
 
   const userAgent = required("KANE_CLI_USER_AGENT") || "kilocode";
   // Job processes get a minimal environment. Runner tokens, GitHub tokens, DATABASE_URL,
@@ -431,6 +681,9 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
   let sandboxed = false;
   let sandboxOutFile = "";
   let sandboxErrFile = "";
+  let pwFile = "";
+  const spawnFn = deps.spawn ?? spawn;
+  const removeFile = deps.removeFile ?? fs.rm;
   if (process.platform === "win32") {
     const entry = resolveKaneCliEntry();
     if (!entry) {
@@ -439,30 +692,38 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
           "Set KAGURA_KANE_CLI_JS to the absolute path of kane-cli.cjs (the npm .cmd shim is never used).",
       );
     }
-    const assessment = isolation.mode === "account" ? isolationAssessment : null;
-    if (requiresIsolation && assessment?.ok) {
+    if (requiresIsolation && activeAssessment?.ok) {
       sandboxed = true;
       sandboxOutFile = path.join(jobCwd, "logs", `stdout-${runId}.txt`);
       sandboxErrFile = path.join(jobCwd, "logs", `stderr-${runId}.txt`);
-      // The sandbox password is never embedded in the command line. It is written to
-      // a per-job file inside the workspace and ACL-locked so only the sandbox account
-      // (and SYSTEM/Administrators) can read it; PowerShell reads it at spawn time.
-      const pwFile = path.join(os.tmpdir(), `kagura-sandbox-pw-${runId}.txt`);
-      await fs.writeFile(pwFile, isolation.sandboxPassword, { encoding: "utf8", mode: 0o600 }).catch(() => {});
+      pwFile = path.join(os.tmpdir(), `kagura-sandbox-pw-${runId}.txt`);
       try {
-        await spawn("icacls", [pwFile, "/inheritance:r", "/grant:r", `${assessment.sandboxUser}:(R)`, "/grant:r", "SYSTEM:(R)"], { shell: false, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }).catch(() => {});
-      } catch {}
+        await prepareSandboxPasswordFile({
+          password: isolation.sandboxPassword,
+          sandboxUser: activeAssessment.sandboxUser,
+          pwFile,
+          removeFile,
+        });
+      } catch (err) {
+        await removeFile(pwFile, { force: true }).catch(() => {});
+        return reject(`Refusing to execute: sandbox password protection failed (${err instanceof Error ? err.message : String(err)}).`);
+      }
       spawnTarget = "powershell.exe";
-      spawnArgs = buildSandboxSpawnCommand({
-        nodeExe: process.execPath,
-        cliEntry: entry,
-        args,
-        cwd: jobCwd,
-        stdoutFile: sandboxOutFile,
-        stderrFile: sandboxErrFile,
-        sandboxUser: assessment.sandboxUser,
-        passwordFile: pwFile,
-      });
+      try {
+        spawnArgs = buildSandboxSpawnCommand({
+          nodeExe: process.execPath,
+          cliEntry: entry,
+          args,
+          cwd: kaneCwd,
+          stdoutFile: sandboxOutFile,
+          stderrFile: sandboxErrFile,
+          sandboxUser: activeAssessment.sandboxUser,
+          passwordFile: pwFile,
+        });
+      } catch (err) {
+        await removeFile(pwFile, { force: true }).catch(() => {});
+        return reject(`Refusing to execute: sandbox launch command could not be built (${err instanceof Error ? err.message : String(err)}).`);
+      }
     } else {
       spawnTarget = process.execPath;
       spawnArgs = [entry, ...args];
@@ -474,60 +735,144 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
     spawnArgs = args;
   }
 
-  const child = spawn(spawnTarget, spawnArgs, {
-    env: sandboxed ? {} : env,
-    cwd: sandboxed ? jobCwd : jobCwd,
-    shell: false,
-    windowsVerbatimArguments: false,
-    windowsHide: true,
-    stdio: sandboxed ? ["ignore", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
-  });
+  if (requiresIsolation && !sandboxed) {
+    await removeFile(pwFile, { force: true }).catch(() => {});
+    return reject("Refusing to execute: OS-level isolation is required but unavailable; no unsandboxed fallback is permitted.");
+  }
+
+  if (!(await checkCancellable())) {
+    await removeFile(pwFile, { force: true }).catch(() => {});
+    return reject("Execution aborted immediately before spawn: cancellation requested or job is no longer claimable", {
+      cancelConfirmed: true,
+      termination: { ok: true, reason: "not_started" },
+    });
+  }
+
+  let child;
+  try {
+    child = spawnFn(spawnTarget, spawnArgs, {
+      env: sandboxed ? {} : env,
+      cwd: kaneCwd,
+      shell: false,
+      windowsVerbatimArguments: false,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (err) {
+    await removeFile(pwFile, { force: true }).catch(() => {});
+    return reject(`Failed to start sandboxed kane-cli: ${err instanceof Error ? err.message : String(err)}`);
+  }
 
   let stdout = "";
   let stderr = "";
-  child.stdout.on("data", (d) => {
+  child.stdout?.on("data", (d) => {
     stdout += d.toString();
   });
-  child.stderr.on("data", (d) => {
+  child.stderr?.on("data", (d) => {
     stderr += d.toString();
   });
 
-  const hbTimer = setInterval(() => {
-    onHeartbeat("executing").catch(() => {});
-  }, 30000);
+  let cancelRequested = false;
+  let termination = null;
+  const heartbeatMs = Number.isFinite(deps.heartbeatMs) && deps.heartbeatMs > 0 ? deps.heartbeatMs : 30000;
+  const hbTimer = setInterval(async () => {
+    const hb = await onHeartbeat("executing").catch(() => null);
+    if (hb && typeof hb === "object" && hb.cancelJobId && !cancelRequested) {
+      cancelRequested = true;
+      termination = await terminateProcessTree(child, {
+        timeoutMs: 5000,
+        spawnFn: deps.terminateSpawn || spawn,
+      });
+      if (!termination.ok) {
+        log(`Cancellation termination not confirmed for job ${job.id}: ${termination.reason}`);
+      }
+    }
+  }, heartbeatMs);
+  const timeoutMs = Math.max(5000, timeoutSec * 1000 + 10000);
 
   const closeResult = await new Promise((resolve) => {
-    child.on("error", async (err) => {
+    let settled = false;
+    let timer;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
       clearInterval(hbTimer);
+      if (timer) clearTimeout(timer);
+      resolve(result);
+    };
+    child.on("error", async (err) => {
       await fs.writeFile(ndjsonPath, "", "utf8").catch(() => {});
-      resolve({
+      finish({
         exitCode: 2,
         outcome: "did_not_start",
         summary: `Failed to start kane-cli: ${err.message}`,
         stdout: "",
         stderr,
+        signal: null,
+        timedOut: false,
+        cancelConfirmed: false,
+        termination,
       });
     });
-    child.on("close", (code) => {
-      clearInterval(hbTimer);
-      resolve({ exitCode: code, stdout, stderr });
+    child.on("close", (code, signal) => {
+      const cancelConfirmed = cancelRequested && termination?.ok === true;
+      finish({
+        exitCode: code,
+        signal,
+        stdout,
+        stderr,
+        timedOut: false,
+        outcome: cancelRequested ? "did_not_start" : undefined,
+        summary: cancelRequested
+          ? cancelConfirmed
+            ? "Cancelled by operator; process tree termination confirmed"
+            : `Cancellation requested but termination not confirmed: ${termination?.reason || "unknown"}`
+          : undefined,
+        cancelConfirmed,
+        termination,
+      });
     });
+    timer = setTimeout(async () => {
+      if (cancelRequested && !termination) {
+        termination = await terminateProcessTree(child, {
+          timeoutMs: 5000,
+          spawnFn: deps.terminateSpawn || spawn,
+        });
+      }
+      if (!termination) {
+        termination = await terminateProcessTree(child, {
+          timeoutMs: 5000,
+          spawnFn: deps.terminateSpawn || spawn,
+        });
+      }
+      finish({
+        exitCode: 3,
+        outcome: "timeout",
+        summary: `Kane execution timed out after ${timeoutMs}ms`,
+        stdout,
+        stderr,
+        signal: null,
+        timedOut: true,
+        cancelConfirmed: cancelRequested && termination?.ok === true,
+        termination,
+      });
+    }, timeoutMs);
   });
 
   // When sandboxed, Kane's stdout/stderr were redirected to files inside the job
-  // workspace; read them back so NDJSON parsing and evidence work unchanged. The
-  // per-job password file is deleted immediately after the process exits.
-  let finalStdout = stdout;
-  let finalStderr = stderr;
+  // workspace; read them back so NDJSON parsing and evidence work unchanged.
+  let finalStdout = closeResult.stdout || stdout;
+  let finalStderr = closeResult.stderr || stderr;
   if (sandboxed) {
     try { finalStdout = await fs.readFile(sandboxOutFile, "utf8"); } catch {}
     try { finalStderr = await fs.readFile(sandboxErrFile, "utf8"); } catch {}
-    const pwFile = path.join(os.tmpdir(), `kagura-sandbox-pw-${runId}.txt`);
-    await fs.rm(pwFile, { force: true }).catch(() => {});
   }
+  if (pwFile) await removeFile(pwFile, { force: true }).catch(() => {});
 
-  await fs.writeFile(ndjsonPath, closeResult.stdout || finalStdout || "", "utf8").catch(() => {});
-  const { runEnd, failingStep } = parseNdjson(closeResult.stdout || finalStdout || "");
+  const effectiveStdout = finalStdout || closeResult.stdout || "";
+  const effectiveStderr = finalStderr || closeResult.stderr || "";
+  await fs.writeFile(ndjsonPath, effectiveStdout, "utf8").catch(() => {});
+  const { runEnd, failingStep } = parseNdjson(effectiveStdout);
   const runEndStatus = typeof runEnd?.status === "string" ? runEnd.status : undefined;
   const outcome = closeResult.outcome || mapOutcome(closeResult.exitCode ?? null, runEndStatus);
   const durationRaw = runEnd?.duration;
@@ -537,7 +882,7 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
       : typeof durationRaw === "string" && !Number.isNaN(Number(durationRaw))
         ? Math.round(Number(durationRaw) * 1000)
         : undefined;
-  const evidenceMatch = String(closeResult.stderr || finalStderr || "").match(/(\S+\.evidence\b)/i);
+  const evidenceMatch = String(effectiveStderr).match(/(\S+\.evidence\b)/i);
 
   return {
     jobId: job.id,
@@ -546,6 +891,7 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
     recordId: job.recordId || job.id,
     outcome,
     exitCode: typeof closeResult.exitCode === "number" ? closeResult.exitCode : null,
+    signal: closeResult.signal ?? null,
     summary:
       typeof runEnd?.summary === "string"
         ? runEnd.summary
@@ -559,12 +905,16 @@ async function executeKaneJob(job, runnerId, onHeartbeat) {
     testUrl: typeof runEnd?.test_url === "string" ? runEnd.test_url : undefined,
     sessionDir: typeof runEnd?.session_dir === "string" ? runEnd.session_dir : undefined,
     ndjsonPath,
+    localContextPath: localContextPath || undefined,
+    localContextMissing,
     workspaceDir: path.relative(ROOT, jobCwd).replace(/\\/g, "/"),
     runEnd,
-    stderr: (closeResult.stderr || finalStderr || undefined) ? String(closeResult.stderr || finalStderr) : undefined,
+    stderr: effectiveStderr || undefined,
     command: `${JSON.stringify(spawnTarget)} ${spawnArgs.map((a) => JSON.stringify(a)).join(" ")} (shell: false, cwd: ${path.relative(ROOT, jobCwd).replace(/\\/g, "/") || "."})`,
     startedAt,
     finishedAt: new Date().toISOString(),
+    cancelConfirmed: closeResult.cancelConfirmed === true,
+    termination: closeResult.termination ?? null,
   };
 }
 
@@ -683,7 +1033,7 @@ export async function runRunnerLoop(deps = {}) {
         if (!lastHeartbeatOk) log("Heartbeat successful");
         lastHeartbeatOk = true;
         hbBackoff = 1000;
-        return true;
+        return res.data || {};
       }
       lastHeartbeatOk = false;
       return false;
@@ -800,7 +1150,7 @@ export async function runRunnerLoop(deps = {}) {
         durationMs: 0, runEnd: { status: "did_not_start", summary: blockedReason }, stderr: "", command: "kane-readiness",
         startedAt: finishedAt, finishedAt,
       };
-      log(`Readiness blocked execution for job ${job.id}: ${lastReadiness.state}`);
+      log(`Readiness blocked execution for job ${job.id}: ${formatReadinessStatus(lastReadiness, requiresIso, isolationState)}`);
       await sendHeartbeat("blocked", job.id);
       try {
         const syncRes = await syncWithRetry(cfg, blockedPayload);
@@ -823,7 +1173,28 @@ export async function runRunnerLoop(deps = {}) {
     let resultPayload;
     try {
       log("Executing Kane verification...");
-      resultPayload = await executeJob(job, runnerId, async (note) => sendHeartbeat(note, job.id));
+      const preSpawn = async () => {
+        const res = await apiRequestFn(cfg, "POST", "/api/runner/validate", {
+          jobId: job.id,
+          runnerId,
+          claimGeneration: job.claimGeneration,
+        }, 10000);
+        return res.status === 200 && res.data?.ok === true;
+      };
+      const getRepositoryToken = async (repoJob, tokenRunnerId) => {
+        const res = await apiRequestFn(cfg, "POST", "/api/runner/repository-token", {
+          jobId: repoJob.id,
+          runnerId: tokenRunnerId,
+          claimGeneration: repoJob.claimGeneration,
+        }, 10000);
+        return res.status === 200 ? res.data : null;
+      };
+      const isRepositoryTargetAllowed = (targetUrl) => targetUrl !== cfg.base;
+      resultPayload = await executeJob(job, runnerId, async (note) => sendHeartbeat(note, job.id), {
+        onPreSpawn: preSpawn,
+        getRepositoryToken,
+        isRepositoryTargetAllowed,
+      });
       log(`Execution finished: ${resultPayload.outcome || "unknown"}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -856,7 +1227,32 @@ export async function runRunnerLoop(deps = {}) {
   return { exitCode: 0, reason: "stopped", processedJobs };
 }
 
+function formatIsolationAssessment(assessment) {
+  const limitations = Array.isArray(assessment?.limitations) && assessment.limitations.length
+    ? ` limitations=${assessment.limitations.join(" | ")}`
+    : "";
+  const checks = isolationProbe
+    ? ` checks=accountExists=${isolationProbe.accountExists} isAdmin=${isolationProbe.isAdmin} aclOk=${isolationProbe.aclOk} secretAclOk=${isolationProbe.secretAclOk} executableOk=${isolationProbe.executableOk} passwordAvailable=${isolationProbe.passwordAvailable}`
+    : "";
+  return `mode=${assessment?.mode || "unknown"} ok=${assessment?.ok === true} reason=${assessment?.reason || "unknown"}${checks}${limitations}`;
+}
+
+export async function runIsolationPreflight(deps = {}) {
+  const loadConfig = deps.loadConfig ?? (async () => { await loadEnv(); return getConfig(); })();
+  const cfg = await loadConfig;
+  void cfg;
+  const isolation = (deps.getIsolation ?? getIsolationConfig)();
+  const assessment = await (deps.assess ?? assessIsolationOnce)(isolation);
+  log(`ISOLATION PREFLIGHT: ${assessment.ok ? "PASS" : "FAIL"}`);
+  log(formatIsolationAssessment(assessment));
+  return assessment;
+}
+
 async function main() {
+  if (process.argv.includes("--preflight")) {
+    const assessment = await runIsolationPreflight();
+    process.exit(assessment.ok ? 0 : 1);
+  }
   const res = await runRunnerLoop();
   if (res && typeof res.exitCode === "number" && res.exitCode !== 0) process.exit(res.exitCode);
 }

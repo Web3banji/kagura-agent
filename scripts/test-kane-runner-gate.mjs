@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { READINESS_STATES } from "./kane-readiness.mjs";
-import { runRunnerLoop } from "./kane-runner.mjs";
+import { runRunnerLoop, syncCompletionWithRetry, formatReadinessStatus, extractSafeResponseError } from "./kane-runner.mjs";
 
 let passed = 0;
 function check(name, cond) { assert.ok(cond, name); passed++; console.log(`PASS ${name}`); }
@@ -123,6 +123,123 @@ async function main() {
     const { deps, calls } = makeDeps({ jobs: [{ ...baseJob, id: "job-success", requestedBy: "u1" }], isolationOk: true, readiness: { state: READINESS_STATES.READY, ready: true, reason: "ok" } });
     await runRunnerLoop(deps);
     check("successful ready path executes and completes", calls.execute === 1 && calls.complete[0]?.outcome === "passed");
+  }
+
+  {
+    let attempts = 0;
+    const request = async () => { attempts++; return attempts < 3 ? { status: 503, reason: "unavailable" } : { status: 200 }; };
+    const res = await syncCompletionWithRetry({}, { jobId: "job-retry" }, 0, 3, request, async () => {});
+    check("completion sync retries transient failures", res.ok === true && attempts === 3);
+  }
+
+  {
+    let attempts = 0;
+    const request = async () => { attempts++; return { status: 409, reason: "conflict" }; };
+    const res = await syncCompletionWithRetry({}, { jobId: "job-conflict" }, 0, 3, request, async () => {});
+    check("completion sync does not retry non-retriable failures", res.ok === false && res.status === 409 && attempts === 1);
+  }
+
+  {
+    let attempts = 0;
+    const request = async () => { attempts++; return { status: 409, data: { error: "Job owner is missing; refusing to complete" } }; };
+    const res = await syncCompletionWithRetry({}, { jobId: "job-409-json" }, 0, 3, request, async () => {});
+    check("409 JSON error is included without retry", res.ok === false && res.status === 409 && attempts === 1 && String(res.reason).includes("Job owner is missing; refusing to complete"));
+  }
+
+  for (const status of [403, 404]) {
+    let attempts = 0;
+    const request = async () => { attempts++; return { status, data: { error: `backend rejected ${status}` } }; };
+    const res = await syncCompletionWithRetry({}, { jobId: `job-${status}` }, 0, 3, request, async () => {});
+    check(`${status} JSON error is included without retry`, res.ok === false && res.status === status && attempts === 1 && String(res.reason).includes(`backend rejected ${status}`));
+  }
+
+  {
+    for (const data of [null, undefined, "", "   ", { raw: "not-json" }, { error: "" }]) {
+      let attempts = 0;
+      const request = async () => { attempts++; return { status: 400, data }; };
+      const res = await syncCompletionWithRetry({}, { jobId: "job-empty" }, 0, 3, request, async () => {});
+      check(`empty/malformed response ${JSON.stringify(data)} does not throw`, res.ok === false && res.status === 400 && attempts === 1 && typeof res.reason === "string");
+    }
+  }
+
+  {
+    const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const request = async () => ({ status: 409, data: { error: `token=${secret} password=hunter2 Bearer abc.def.ghi` } });
+    const res = await syncCompletionWithRetry({}, { jobId: "job-secret" }, 0, 1, request, async () => {});
+    check("response error redacts secrets", !String(res.reason).includes(secret) && !String(res.reason).includes("hunter2") && String(res.reason).includes("[REDACTED]"));
+  }
+
+  {
+    const long = "x".repeat(1000);
+    const request = async () => ({ status: 409, data: { error: long } });
+    const res = await syncCompletionWithRetry({}, { jobId: "job-long" }, 0, 1, request, async () => {});
+    check("response error is truncated", String(res.reason).length <= 520 && String(res.reason).includes("..."));
+    const direct = extractSafeResponseError({ error: long });
+    check("helper truncates directly", String(direct).length <= 500 && String(direct).endsWith("..."));
+  }
+
+  {
+    const { deps, calls } = makeDeps({
+      jobs: [{ ...baseJob, id: "job-409-retained" }],
+      readiness: { state: READINESS_STATES.KANE_MISSING, ready: false, reason: "missing" },
+      deps: {
+        syncCompletionWithRetry: async () => ({ ok: false, status: 409, reason: "HTTP 409: Job owner is missing; refusing to complete" }),
+      },
+    });
+    await runRunnerLoop(deps);
+    const enqueued = calls.complete.find((c) => c.__enqueued === true);
+    check("409 completion remains non-retriable and retained", enqueued?.__nonRetriable === true && String(enqueued?.__reason).includes("Job owner is missing"));
+    check("pending payload is preserved unchanged", enqueued?.jobId === "job-409-retained" && enqueued?.outcome === "did_not_start");
+  }
+
+  {
+    let attempts = 0;
+    const request = async () => { attempts++; return { status: 503, reason: "unavailable" }; };
+    const res = await syncCompletionWithRetry({}, { jobId: "job-exhaust" }, 0, 2, request, async () => {});
+    check("completion sync exhausts retries", res.ok === false && attempts === 2);
+  }
+
+  {
+    const text = formatReadinessStatus({ state: READINESS_STATES.READY, ready: true }, true, { ok: false, reason: "sandbox account missing" });
+    check("readiness log distinguishes kane isolation and overall", text.includes("kane=ready/ready") && text.includes("isolation=blocked:sandbox account missing") && text.includes("overall=blocked"));
+  }
+
+  {
+    let active = 0;
+    let maxActive = 0;
+    const jobs = [{ ...baseJob, id: "seq-1" }, { ...baseJob, id: "seq-2" }];
+    const deps = {
+      disableSignals: true,
+      maxJobs: 2,
+      cfg: { base: "http://127.0.0.1:1", token: "t", pollMs: 1, heartbeatMs: 60000, maxBackoffMs: 5 },
+      isolation: { mode: "account", isolateAllJobs: false, sandboxUser: "sandbox", profilesRoot: os.tmpdir(), workspacesRoot: os.tmpdir(), repoRoot: process.cwd() },
+      runnerId: "runner-seq",
+      version: "test",
+      assessReadiness: async () => ({ state: READINESS_STATES.READY, ready: true, reason: "ok" }),
+      assessIsolation: async () => ({ ok: true, reason: "ok" }),
+      requiresIsolation: () => true,
+      executeKaneJob: async (job) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 30));
+        active--;
+        return { jobId: job.id, runnerId: "runner-seq", claimedBy: "runner-seq", outcome: "passed", exitCode: 0, summary: "ok", startedAt: new Date().toISOString(), finishedAt: new Date().toISOString() };
+      },
+      apiRequest: async (_cfg, _method, pathname) => {
+        if (pathname === "/api/runner/claim") {
+          const job = jobs.shift();
+          return job ? { status: 200, data: { job } } : { status: 204, data: null };
+        }
+        return { status: 200, data: { ok: true } };
+      },
+      syncCompletionWithRetry: async () => ({ ok: true, status: 200 }),
+      enqueuePendingSync: async () => "",
+      sleep: async () => {},
+      flushSyncQueue: async () => ({ flushed: 0 }),
+      pruneStaleWorkspaces: async () => ({ removed: 0 }),
+    };
+    const res = await runRunnerLoop(deps);
+    check("runner executes at most one ordinary job at a time", maxActive === 1 && res.processedJobs === 2);
   }
 
   console.log(`\n${passed} checks passed (runner gate)`);

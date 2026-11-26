@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { normalizeJobInput } from "@/lib/kane/security";
 import { getRequestPrincipal, unauthorizedResponse } from "@/lib/auth";
+import { RepositoryContextError, resolveJobRepositoryContext } from "@/lib/verification/repository-context";
 import { principalHasLegacyAccess } from "@/lib/auth/guards";
 import { scopeForPrincipal } from "@/lib/auth/scope";
 import { enqueueJob, getJob, readJobs } from "@/lib/verification/jobs";
@@ -48,6 +49,9 @@ async function handleJobsPost(req: Request) {
     if (!scope.privileged && !scope.userId && !scope.includeLegacy) {
       return NextResponse.json({ error: "Verification jobs are not available for this account." }, { status: 403 });
     }
+    if (!principal.userId?.trim()) {
+      return NextResponse.json({ error: "A valid authenticated owner is required to queue verification jobs." }, { status: 400 });
+    }
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
     const requestedProjectId = typeof body.projectId === "string" ? body.projectId : undefined;
     let projectId: string | undefined;
@@ -64,13 +68,30 @@ async function handleJobsPost(req: Request) {
     const normalized = normalizeJobInput(body, {
       defaultUrl: process.env.KAGURA_APP_URL || process.env.ECHOLOG_APP_URL || "http://localhost:3000",
     });
+    if (!projectId) {
+      return NextResponse.json({ error: "projectId is required for repository-aware verification" }, { status: 400 });
+    }
+    let repository: import("@/lib/verification/repository-context").RepositoryJobContext;
+    try {
+      repository = await resolveJobRepositoryContext(projectId, principal.userId);
+    } catch (err) {
+      if (err instanceof RepositoryContextError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
+      }
+      throw err;
+    }
     const job = await enqueueJob({
       flow: normalized.flow,
       objective: normalized.objective,
-      url: normalized.url,
+      url: repository.targetUrl,
       timeout: normalized.timeout,
       projectId,
       requestedBy: principal.userId,
+      repositoryConnectionId: repository.repositoryConnectionId,
+      repositoryOwner: repository.repositoryOwner,
+      repositoryName: repository.repositoryName,
+      repositoryFullName: repository.repositoryFullName,
+      repositoryDefaultBranch: repository.repositoryDefaultBranch,
       reason: "jobs-api",
     });
     return NextResponse.json({ job, status: "pending" });
@@ -87,14 +108,12 @@ async function handleRun(req: Request) {
     if (!scope.privileged && !scope.userId && !scope.includeLegacy) {
       return NextResponse.json({ error: "Verification runs are not available for this account." }, { status: 403 });
     }
+    if (!principal.userId?.trim()) {
+      return NextResponse.json({ error: "A valid authenticated owner is required to queue verification runs." }, { status: 400 });
+    }
     const body = (await req.json().catch(() => ({}))) as { flow?: string; url?: string; objective?: string; projectId?: string };
     const flow = typeof body.flow === "string" && body.flow ? body.flow : "shell-nav";
     const objective = typeof body.objective === "string" && body.objective.trim() ? body.objective.trim() : FLOW_OBJECTIVE;
-    const url =
-      (typeof body.url === "string" && body.url.trim()) ||
-      process.env.KAGURA_APP_URL ||
-      process.env.ECHOLOG_APP_URL ||
-      "http://localhost:3000";
     let projectId: string | undefined;
     if (scope.privileged) {
       projectId = body.projectId;
@@ -106,13 +125,30 @@ async function handleRun(req: Request) {
     } else {
       return NextResponse.json({ error: "Verification runs are not available for this account." }, { status: 403 });
     }
+    if (!projectId) {
+      return NextResponse.json({ error: "projectId is required for repository-aware verification" }, { status: 400 });
+    }
+    let repository: import("@/lib/verification/repository-context").RepositoryJobContext;
+    try {
+      repository = await resolveJobRepositoryContext(projectId, principal.userId);
+    } catch (err) {
+      if (err instanceof RepositoryContextError) {
+        return NextResponse.json({ error: err.message }, { status: err.status });
+      }
+      throw err;
+    }
     const now = new Date().toISOString();
     const job = await enqueueJob({
       flow,
       objective,
-      url,
+      url: repository.targetUrl,
       projectId,
       requestedBy: principal.userId,
+      repositoryConnectionId: repository.repositoryConnectionId,
+      repositoryOwner: repository.repositoryOwner,
+      repositoryName: repository.repositoryName,
+      repositoryFullName: repository.repositoryFullName,
+      repositoryDefaultBranch: repository.repositoryDefaultBranch,
       headless: true,
       timeout: 180,
       reason: "dashboard",
@@ -121,7 +157,7 @@ async function handleRun(req: Request) {
       id: job.id,
       flow,
       objective,
-      url,
+      url: repository.targetUrl,
       outcome: "pending",
       summary: "Verification job queued. Awaiting shared runner execution.",
       startedAt: now,

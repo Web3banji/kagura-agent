@@ -30,6 +30,7 @@ import { readStories, upsertStory, getStoryById } from "@/lib/stories/store";
 import { readRuns, createRun, updateRun } from "@/lib/agent/runs";
 import { enqueueJob, readJobs, getJob, updateJob } from "@/lib/verification/jobs";
 import { readVerificationRecords, upsertVerificationRecord } from "@/lib/verification/store";
+import { createRepositoryConnection, linkRepositoryToProject } from "@/lib/repositories/connections";
 
 type UserFixture = {
   userId: string;
@@ -290,16 +291,35 @@ async function main() {
 
     // ---------- API route integration ----------
     check("POST /api/verification/jobs sets owner to caller, never to forged body owner", async () => {
-      const r = await fetch("http://localhost/api/verification/jobs", {
-        method: "POST",
-        body: JSON.stringify({ flow: "shell-nav", objective: "x", url: "http://x.example", requestedBy: bob.userId }),
-        headers: { Cookie: alice.cookie, "Content-Type": "application/json" },
-      });
-      assert.equal(r.status, 200);
-      const body = await r.json();
-      assert.equal(body.job.requestedBy, alice.userId, "requestedBy must be the caller, not the forged body value");
-      assert.notEqual(body.job.requestedBy, bob.userId);
-      await getPool().query("DELETE FROM verification_jobs WHERE id = $1", [body.job.id]);
+      const projectId = `pj-${randomUUID().slice(0, 8)}`;
+      const conn = await createRepositoryConnection(alice.userId, { provider: "github", providerAccountId: `pa-${randomUUID().slice(0, 8)}`, githubRepoId: `123-${randomUUID().slice(0, 8)}`, repoOwner: "acme", repoName: "site", fullName: "acme/site", defaultBranch: "main", isPrivate: false, permissions: {}, status: "active" });
+      await getPool().query(`INSERT INTO projects (id, owner_user_id, name, slug, target_url, is_bootstrap, created_at, updated_at) VALUES ($1,$2,'P','p','https://trusted.example',false,NOW(),NOW())`, [projectId, alice.userId]);
+      await linkRepositoryToProject(projectId, conn.id, alice.userId);
+      try {
+        const r = await fetch("http://localhost/api/verification/jobs", {
+          method: "POST",
+          body: JSON.stringify({ flow: "shell-nav", objective: "x", url: "http://x.example", projectId, requestedBy: bob.userId }),
+          headers: { Cookie: alice.cookie, "Content-Type": "application/json" },
+        });
+        assert.equal(r.status, 200);
+        const body = await r.json();
+        assert.equal(body.job.requestedBy, alice.userId, "requestedBy must be the caller, not the forged body value");
+        assert.notEqual(body.job.requestedBy, bob.userId);
+        assert.equal(body.job.repositoryFullName, "acme/site");
+        assert.equal(body.job.url, "https://trusted.example", "client URL override must be ignored");
+        await getPool().query("DELETE FROM verification_jobs WHERE id = $1", [body.job.id]);
+        const denied = await fetch("http://localhost/api/projects", { method: "PATCH", body: JSON.stringify({ id: projectId, targetUrl: "https://evil.example" }), headers: { Cookie: bob.cookie, "Content-Type": "application/json" } });
+        assert.equal(denied.status, 404, "another user cannot edit target URL");
+        const invalid = await fetch("http://localhost/api/projects", { method: "PATCH", body: JSON.stringify({ id: projectId, targetUrl: "https://u:p@evil.example" }), headers: { Cookie: alice.cookie, "Content-Type": "application/json" } });
+        assert.equal(invalid.status, 400, "credentials in target URL are rejected");
+        const saved = await fetch("http://localhost/api/projects", { method: "PATCH", body: JSON.stringify({ id: projectId, targetUrl: "https://owned.example" }), headers: { Cookie: alice.cookie, "Content-Type": "application/json" } });
+        assert.equal(saved.status, 200, "owner can edit target URL");
+        assert.equal((await saved.json()).project.targetUrl, "https://owned.example");
+      } finally {
+        await getPool().query("DELETE FROM project_repository_links WHERE project_id = $1", [projectId]);
+        await getPool().query("DELETE FROM repository_connections WHERE id = $1", [conn.id]);
+        await getPool().query("DELETE FROM projects WHERE id = $1", [projectId]);
+      }
     });
 
     check("GET /api/verification/jobs shows only caller's jobs", async () => {
@@ -349,4 +369,3 @@ main().catch((err) => {
   console.error("FATAL", err);
   process.exit(2);
 });
-

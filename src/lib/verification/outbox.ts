@@ -2,7 +2,7 @@ import { ensureDb, getPool, hasDatabase, isProductionRuntime } from "@/lib/db";
 import { promises as fs } from "fs";
 import path from "path";
 
-export type OutboxStatus = "pending" | "processing" | "completed" | "failed" | "dead";
+export type OutboxStatus = "pending" | "processing" | "completed" | "failed" | "dead" | "cancelled";
 export type VerificationProcessingOutbox = {
   id: string;
   jobId: string;

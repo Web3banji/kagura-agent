@@ -97,10 +97,11 @@ check("canonical workspace/profile roots are consistent and outside repo by conf
 check("assessIsolation fails closed when ACL/executable probes are unavailable or unconfirmed", () => {
   const cfg = { mode: "account", sandboxUser: "S", workspacesRoot: "C:/KaguraRunner/workspaces", profilesRoot: "C:/KaguraRunner/profiles", repoRoot: "C:/repo", isolateAllJobs: false };
   for (const probe of [
-    { accountExists: false, isAdmin: false, aclOk: false, secretAclOk: false, executableOk: false },
-    { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: false, executableOk: true },
-    { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: true, executableOk: false },
-    { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: undefined, executableOk: true },
+    { accountExists: false, isAdmin: false, aclOk: false, secretAclOk: false, executableOk: false, passwordAvailable: true },
+    { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: false, executableOk: true, passwordAvailable: true },
+    { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: true, executableOk: false, passwordAvailable: true },
+    { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: true, executableOk: true, passwordAvailable: false },
+    { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: undefined, executableOk: true, passwordAvailable: true },
   ]) {
     const res = assessIsolation(cfg, probe);
     assert.equal(res.ok, false, `expected fail-closed for ${JSON.stringify(probe)}`);
@@ -109,7 +110,7 @@ check("assessIsolation fails closed when ACL/executable probes are unavailable o
 
 check("assessIsolation reports host-boundary limitation on success", () => {
   const cfg = { mode: "account", sandboxUser: "S", workspacesRoot: "C:/KaguraRunner/workspaces", profilesRoot: "C:/KaguraRunner/profiles", repoRoot: "C:/repo", isolateAllJobs: false };
-  const res = assessIsolation(cfg, { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: true, executableOk: true });
+  const res = assessIsolation(cfg, { accountExists: true, isAdmin: false, aclOk: true, secretAclOk: true, executableOk: true, passwordAvailable: true });
   assert.equal(res.ok, true);
   assert.match(res.reason, /host boundary/i);
   assert.ok(Array.isArray(res.limitations));

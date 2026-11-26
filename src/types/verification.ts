@@ -24,6 +24,8 @@ export interface VerificationRecord {
   testUrl?: string;
   sessionDir?: string;
   ndjsonPath?: string;
+  localContextPath?: string;
+  localContextMissing?: boolean;
   runEnd?: Record<string, unknown>;
   stderr?: string;
   startedAt: string;
@@ -69,7 +71,23 @@ export type VerificationJobStatus =
   | "running"
   | "completed"
   | "failed"
-  | "did_not_start";
+  | "did_not_start"
+  | "cancelled"
+  | "cancelling";
+
+export interface VerificationJobAttempt {
+  attempt: number;
+  status: VerificationJobStatus;
+  claimedBy?: string;
+  runnerId?: string;
+  claimGeneration?: number;
+  startedAt?: string;
+  finishedAt?: string;
+  outcome?: string;
+  summary?: string;
+  error?: string;
+  recordedAt: string;
+}
 
 export interface VerificationJobResult {
   exitCode?: number;
@@ -82,6 +100,8 @@ export interface VerificationJobResult {
   testUrl?: string;
   sessionDir?: string;
   ndjsonPath?: string;
+  localContextPath?: string;
+  localContextMissing?: boolean;
   runEnd?: Record<string, unknown>;
   stderr?: string;
   startedAt?: string;
@@ -96,6 +116,11 @@ export interface VerificationJob {
   url: string;
   projectId?: string;
   requestedBy?: string;
+  repositoryConnectionId?: string;
+  repositoryOwner?: string;
+  repositoryName?: string;
+  repositoryFullName?: string;
+  repositoryDefaultBranch?: string | null;
   chromeProfile?: string;
   headless?: boolean;
   timeout?: number;
@@ -113,6 +138,8 @@ export interface VerificationJob {
   error?: string;
   result?: VerificationJobResult;
   claimGeneration?: number;
+  attempts?: VerificationJobAttempt[];
+  cancellationRequestedAt?: string;
 }
 
 export type RunnerReadinessState =

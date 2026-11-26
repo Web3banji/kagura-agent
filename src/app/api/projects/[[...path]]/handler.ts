@@ -5,6 +5,7 @@ import { randomUUID } from "crypto";
 import { getRepositoryConnectionForUser, linkRepositoryToProject, listRepositoryLinksForProject, listProjectsForRepositoryConnection } from "@/lib/repositories/connections";
 import type { ProjectRepositoryLink } from "@/types/repository";
 import { observeProjectRepositories } from "@/lib/github/observe-project";
+import { validateUrl } from "@/lib/kane/security";
 
 export const dynamic = "force-dynamic";
 
@@ -29,7 +30,7 @@ async function handleBaseGet(req: Request) {
   try {
     await ensureDb();
     const res = await getPool().query(
-      `SELECT p.id, p.owner_user_id, p.name, p.slug, p.is_bootstrap, p.created_at, p.updated_at,
+      `SELECT p.id, p.owner_user_id, p.name, p.slug, p.target_url, p.is_bootstrap, p.created_at, p.updated_at,
               rc.id AS repository_connection_id,
               rc.full_name AS repository_full_name,
               rc.repo_owner,
@@ -55,6 +56,7 @@ async function handleBaseGet(req: Request) {
         owner_user_id: row.owner_user_id,
         name: row.name,
         slug: row.slug,
+        targetUrl: row.target_url ?? null,
         is_bootstrap: row.is_bootstrap,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -88,9 +90,15 @@ async function handleBasePost(req: Request) {
   }
   try {
     await ensureDb();
-    const body = (await req.json().catch(() => ({}))) as { name?: string; slug?: string; repositoryConnectionId?: string };
+    const body = (await req.json().catch(() => ({}))) as { name?: string; slug?: string; repositoryConnectionId?: string; targetUrl?: string };
     const name = (body.name || "").trim();
     if (!name) return NextResponse.json({ error: "Project name is required" }, { status: 400 });
+    let targetUrl: string | null = null;
+    if (typeof body.targetUrl === "string" && body.targetUrl.trim()) {
+      const validated = validateUrl(body.targetUrl);
+      if (!validated.ok) return NextResponse.json({ error: validated.reason }, { status: 400 });
+      targetUrl = validated.url;
+    }
     const slug = (body.slug || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
     const repositoryConnectionId = (body.repositoryConnectionId || "").trim();
     if (!repositoryConnectionId) {
@@ -118,11 +126,11 @@ async function handleBasePost(req: Request) {
         return NextResponse.json({ error: "Repository is already assigned to another project" }, { status: 409 });
       }
       const id = randomUUID();
-      await client.query(`INSERT INTO projects (id, owner_user_id, name, slug, is_bootstrap, created_at, updated_at) VALUES ($1,$2,$3,$4,FALSE,NOW(),NOW())`, [id, user.id, name, slug]);
+      await client.query(`INSERT INTO projects (id, owner_user_id, name, slug, target_url, is_bootstrap, created_at, updated_at) VALUES ($1,$2,$3,$4,$5,FALSE,NOW(),NOW())`, [id, user.id, name, slug, targetUrl]);
       const linkId = randomUUID();
       await client.query(`INSERT INTO project_repository_links (id, project_id, repository_connection_id, owner_user_id, link_status, created_at) VALUES ($1,$2,$3,$4,'active',NOW())`, [linkId, id, repositoryConnectionId, user.id]);
       await client.query("COMMIT");
-      return NextResponse.json({ project: { id, owner_user_id: user.id, name, slug, is_bootstrap: false }, repositoryConnection: connection });
+      return NextResponse.json({ project: { id, owner_user_id: user.id, name, slug, targetUrl, is_bootstrap: false }, repositoryConnection: connection });
     } catch (err) {
       try { await client.query("ROLLBACK"); } catch {}
       throw err;
@@ -345,8 +353,35 @@ export async function POST(req: Request, ctx: { params: { path?: string[] } }) {
   return notFound();
 }
 
+async function handleBasePatch(req: Request) {
+  const userOrRes = await requireUserApi(req);
+  if (!(userOrRes as { id?: string }).id) return userOrRes as Response;
+  const user = userOrRes as { id: string };
+  if (!hasDatabase()) {
+    return NextResponse.json({ error: "Database is not configured" }, { status: 500 });
+  }
+  await ensureDb();
+  const body = (await req.json().catch(() => ({}))) as { id?: string; targetUrl?: string | null };
+  const projectId = typeof body.id === "string" ? body.id : "";
+  if (!projectId) return NextResponse.json({ error: "Project id is required" }, { status: 400 });
+  let targetUrl: string | null = null;
+  if (typeof body.targetUrl === "string" && body.targetUrl.trim()) {
+    const validated = validateUrl(body.targetUrl);
+    if (!validated.ok) return NextResponse.json({ error: validated.reason }, { status: 400 });
+    targetUrl = validated.url;
+  }
+  const res = await getPool().query(
+    `UPDATE projects SET target_url = $1, updated_at = NOW() WHERE id = $2 AND owner_user_id = $3 RETURNING id, name, slug, target_url`,
+    [targetUrl, projectId, user.id],
+  );
+  if (res.rowCount === 0) return NextResponse.json({ error: "Project not found" }, { status: 404 });
+  const row = res.rows[0];
+  return NextResponse.json({ project: { id: row.id, name: row.name, slug: row.slug, targetUrl: row.target_url } });
+}
+
 export async function PATCH(req: Request, ctx: { params: { path?: string[] } }) {
   const path = (ctx.params.path || []).join("/");
+  if (path === "") return handleBasePatch(req);
   const m = path.match(/^([^/]+)\/repositories$/);
   if (m) return handleProjectRepositoriesPatch(req, decodeURIComponent(m[1]));
   return notFound();

@@ -2,11 +2,49 @@ import { getJob } from "@/lib/verification/jobs";
 import { getVerificationRecord, upsertVerificationRecord } from "@/lib/verification/store";
 import { processVerificationResult } from "@/lib/investigations/processor";
 import { claimNextVerificationProcessing, markVerificationProcessingCompleted, markVerificationProcessingFailed, readOutboxItems, type VerificationProcessingOutbox } from "@/lib/verification/outbox";
-import { resolveActiveRepositoryConnectionId } from "@/lib/repositories/connections";
+import { getRepositoryConnectionForUser, resolveActiveRepositoryConnectionId } from "@/lib/repositories/connections";
 
 export type DrainResult = { processed: number; failed: number; skipped: number; items: Array<{ id: string; status: string; reason?: string }>; investigationIds?: string[]; state?: "pending"|"processing"|"processed"|"failed" };
 
 function backoffMs(attempt: number): number { return Math.min(5 * 60_000, 15_000 * Math.max(1, attempt)); }
+
+type OutboxRepositoryDeps = {
+  getRepositoryConnectionForUser?: typeof getRepositoryConnectionForUser;
+  resolveActiveRepositoryConnectionId?: typeof resolveActiveRepositoryConnectionId;
+};
+
+/**
+ * Resolve the repository connection that must own investigation processing.
+ * A repository-aware job is pinned to its persisted connection; the project's
+ * current active link is never substituted. Historical jobs without a persisted
+ * connection keep the legacy active-link fallback.
+ */
+export async function resolveOutboxRepositoryConnection(
+  job: { projectId?: string | null; requestedBy?: string; repositoryConnectionId?: string; repositoryOwner?: string; repositoryName?: string; repositoryFullName?: string },
+  deps: OutboxRepositoryDeps = {},
+): Promise<string | null> {
+  const owner = typeof job.requestedBy === "string" ? job.requestedBy.trim() : "";
+  if (!owner) throw new Error("owner_mismatch");
+  if (job.repositoryConnectionId) {
+    const getConnection = deps.getRepositoryConnectionForUser ?? getRepositoryConnectionForUser;
+    const connection = await getConnection(job.repositoryConnectionId, owner);
+    if (!connection) throw new Error("repository_connection_unavailable");
+    if (connection.ownerUserId !== owner) throw new Error("repository_owner_mismatch");
+    if (connection.status === "revoked" || connection.status === "error") throw new Error("repository_connection_inactive");
+    if (!job.repositoryFullName || connection.fullName !== job.repositoryFullName) {
+      throw new Error("repository_identity_mismatch");
+    }
+    if (job.repositoryOwner && connection.repoOwner !== job.repositoryOwner) {
+      throw new Error("repository_owner_identity_mismatch");
+    }
+    if (job.repositoryName && connection.repoName !== job.repositoryName) {
+      throw new Error("repository_name_identity_mismatch");
+    }
+    return connection.id;
+  }
+  const resolveActive = deps.resolveActiveRepositoryConnectionId ?? resolveActiveRepositoryConnectionId;
+  return resolveActive(job.projectId, owner);
+}
 
 async function loadOwnedRecord(item: VerificationProcessingOutbox) {
   const job = await getJob(item.jobId);
@@ -23,7 +61,7 @@ async function loadOwnedRecord(item: VerificationProcessingOutbox) {
   return { ok: true as const, job, record };
 }
 
-export async function processOutboxItem(item: VerificationProcessingOutbox, workerId: string): Promise<{ status: string; investigationIds?: string[]; state?: "pending"|"processing"|"processed"|"failed"; reason?: string }> {
+export async function processOutboxItem(item: VerificationProcessingOutbox, workerId: string, deps: OutboxRepositoryDeps = {}): Promise<{ status: string; investigationIds?: string[]; state?: "pending"|"processing"|"processed"|"failed"; reason?: string }> {
   const owned = await loadOwnedRecord(item);
   if (!owned.ok) {
     await markVerificationProcessingFailed(item.id, { workerId, claimGeneration: item.claimGeneration, error: owned.reason, retryDelayMs: 60_000 });
@@ -43,7 +81,7 @@ export async function processOutboxItem(item: VerificationProcessingOutbox, work
   await upsertVerificationRecord({ ...record, investigationProcessing: { state: "processing", processingStartedAt, attemptCount: (record.investigationProcessing?.attemptCount ?? 0) + 1 } }, { expectOwner: item.ownerUserId, expectedJobId: item.jobId, expectedProjectId: item.projectId, expectedRecordId: item.recordId, allowReplay: false }).catch(() => undefined);
 
   try {
-    const repositoryConnectionId = await resolveActiveRepositoryConnectionId(item.projectId, item.ownerUserId);
+    const repositoryConnectionId = await resolveOutboxRepositoryConnection(owned.job, deps);
     const resultInv = await processVerificationResult({
       ...record,
       requestedBy: item.ownerUserId,
