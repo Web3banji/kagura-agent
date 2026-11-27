@@ -3,15 +3,17 @@ import { EmptyState, PageHeader, Panel } from "@/components/ui/Primitives";
 import { readStories } from "@/lib/stories/store";
 import { readInvestigations } from "@/lib/investigations/store";
 import { readVerificationRecords } from "@/lib/verification/store";
+import { resolveReportPrompts } from "@/lib/reports/store";
 import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
 import { scopeForPrincipal } from "@/lib/auth/scope";
 import { resolveProjectIdsForUser } from "@/lib/verification/context";
 import { getPool, ensureDb, hasDatabase } from "@/lib/db";
+import { ReportActions } from "@/app/(dashboard)/reports/report-actions";
 import type { Story } from "@/types/story";
 import type { Investigation } from "@/types/investigation";
 import type { VerificationRecord } from "@/types/verification";
 
-type ReportStatus = "published" | "attention";
+type ReportStatus = "ready" | "attention";
 
 function fmtDate(value?: string | null): string {
   if (!value) return "Unknown date";
@@ -20,14 +22,16 @@ function fmtDate(value?: string | null): string {
   return d.toLocaleString();
 }
 
-async function resolveProjectNames(projectIds: string[], userId: string | undefined): Promise<Map<string, string>> {
+async function resolveProjectNames(projectIds: string[], userId: string | undefined, privileged = false): Promise<Map<string, string>> {
   const map = new Map<string, string>();
-  for (const id of projectIds) map.set(id, id);
-  if (!hasDatabase() || !userId || projectIds.length === 0) return map;
+  for (const id of projectIds) map.set(id, "Unknown project");
+  if (!hasDatabase() || projectIds.length === 0 || (!userId && !privileged)) return map;
   try {
     await ensureDb();
-    const res = await getPool().query(`SELECT id, name FROM projects WHERE owner_user_id = $1 AND id = ANY($2::text[])`, [userId, projectIds]);
-    for (const row of res.rows as Array<{ id: string; name: string }>) map.set(String(row.id), String(row.name || row.id));
+    const res = privileged
+      ? await getPool().query(`SELECT id, name FROM projects WHERE id = ANY($1::text[])`, [projectIds])
+      : await getPool().query(`SELECT id, name FROM projects WHERE owner_user_id = $1 AND id = ANY($2::text[])`, [userId, projectIds]);
+    for (const row of res.rows as Array<{ id: string; name: string }>) map.set(String(row.id), String(row.name || "Unknown project"));
   } catch {}
   return map;
 }
@@ -54,7 +58,7 @@ function reportNeedsAttention(s: Story): boolean {
 }
 
 function reportStatus(s: Story): ReportStatus {
-  return reportNeedsAttention(s) ? "attention" : "published";
+  return reportNeedsAttention(s) ? "attention" : "ready";
 }
 
 function normalize(v: string | string[] | undefined): string {
@@ -77,31 +81,31 @@ export default async function ReportsSection({
   const principal = await getServerPrincipal();
   const scope = scopeForPrincipal(principal);
   const allowLegacy = !principal.userId || principalHasLegacyAccess(principal);
-  const visibleProjectIds = principal.userId ? await resolveProjectIdsForUser(principal.userId) : [];
+  const visibleProjectIds = scope.privileged ? null : principal.userId ? await resolveProjectIdsForUser(principal.userId) : [];
 
   const [stories, investigations, verification] = await Promise.all([
     readStories(scope).catch(() => [] as Story[]),
     readInvestigations(scope).catch(() => [] as Investigation[]),
-    readVerificationRecords({ requestedBy: principal.userId ?? undefined, includeLegacy: allowLegacy }).catch(() => [] as VerificationRecord[]),
+    readVerificationRecords({ requestedBy: scope.privileged ? undefined : principal.userId ?? undefined, includeLegacy: allowLegacy }).catch(() => [] as VerificationRecord[]),
   ]);
 
   const reports = stories
     .filter((s) => s.status === "published")
     .filter((s) => {
       const pid = (s as Story & { projectId?: string }).projectId;
-      return !pid || visibleProjectIds.includes(pid);
+      return !pid || visibleProjectIds === null || visibleProjectIds.includes(pid);
     })
     .sort((a, b) => new Date(b.publishedAt || b.updatedAt).getTime() - new Date(a.publishedAt || a.updatedAt).getTime());
 
-  const scopedInvestigations = investigations.filter((i) => !i.projectId || visibleProjectIds.includes(i.projectId));
-  const scopedVerification = verification.filter((r) => (r.projectId ? visibleProjectIds.includes(r.projectId) : allowLegacy));
+  const scopedInvestigations = investigations.filter((i) => visibleProjectIds === null || !i.projectId || visibleProjectIds.includes(i.projectId));
+  const scopedVerification = verification.filter((r) => visibleProjectIds === null || (r.projectId ? visibleProjectIds.includes(r.projectId) : allowLegacy));
 
   const projectIds = Array.from(new Set([
     ...reports.map((s) => (s as Story & { projectId?: string }).projectId).filter((v): v is string => !!v),
     ...scopedInvestigations.map((i) => i.projectId).filter((v): v is string => !!v),
     ...scopedVerification.map((r) => r.projectId).filter((v): v is string => !!v),
   ]));
-  const projectNames = await resolveProjectNames(projectIds, principal.userId);
+  const projectNames = await resolveProjectNames(projectIds, principal.userId, scope.privileged);
 
   const verificationById = new Map(scopedVerification.map((r) => [r.id, r]));
   const investigationsByVerification = new Map<string, Investigation[]>();
@@ -140,6 +144,22 @@ export default async function ReportsSection({
   const selectedVerificationSnapshot = selected?.verification;
   const selectedCurrentVerification = selectedVerificationSnapshot?.id ? verificationById.get(selectedVerificationSnapshot.id) : undefined;
   const selectedInvestigations = selectedCurrentVerification ? (investigationsByVerification.get(selectedCurrentVerification.id) || []) : [];
+  const snapshotIssues = selectedVerificationSnapshot?.issues ?? [];
+  const selectedIssues = snapshotIssues.length > 0
+    ? snapshotIssues
+    : selectedInvestigations.map((inv) => ({
+        id: inv.id,
+        title: inv.title,
+        severity: inv.severity ?? null,
+        status: inv.status,
+        simpleExplanation: inv.simpleExplanation,
+        technicalExplanation: inv.technicalExplanation,
+        affectedAreas: inv.affectedAreas ?? null,
+        expectedBehaviour: inv.expectedBehaviour ?? null,
+        actualBehaviour: inv.actualBehaviour ?? null,
+        aiFixPrompt: inv.aiFixPrompt ?? null,
+      }));
+  const selectedPrompts = selected ? resolveReportPrompts(selected, scopedInvestigations, selectedCurrentVerification) : [];
   const selectedProjectId = selected ? (selected as Story & { projectId?: string }).projectId : undefined;
   const selectedProjectName = selectedProjectId ? projectNames.get(selectedProjectId) || selectedProjectId : "No project linked";
 
@@ -160,28 +180,28 @@ export default async function ReportsSection({
       <PageHeader
         eyebrow="REPORTS"
         title="Reports"
-        subtitle="Published reports generated from real project activity and verification evidence. Reports distinguish completed checks, genuine issues, and blocked or incomplete checks."
+        subtitle="Verification reports generated from real project activity and verification evidence. Reports distinguish completed checks, genuine issues, and blocked or incomplete checks."
       />
 
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Panel><div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Available reports</div><div className="mt-2 text-2xl font-semibold text-fg">{reports.length}</div><div className="mt-1 text-xs text-muted">Published report records currently available.</div></Panel>
-        <Panel><div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Most recent report</div><div className="mt-2 text-sm font-semibold text-fg">{latest ? latest.title : "No reports yet"}</div><div className="mt-1 text-xs text-muted">{latest ? fmtDate(latest.publishedAt || latest.updatedAt) : "A report will appear after publishing."}</div></Panel>
-        <Panel><div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Needs attention</div><div className="mt-2 text-2xl font-semibold text-fg">{attentionCount}</div><div className="mt-1 text-xs text-muted">Published reports whose attached verification reported failure, block, or incomplete execution.</div></Panel>
+        <Panel><div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Available reports</div><div className="mt-2 text-2xl font-semibold text-fg">{reports.length}</div><div className="mt-1 text-xs text-muted">Report records currently available.</div></Panel>
+        <Panel><div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Most recent report</div><div className="mt-2 text-sm font-semibold text-fg">{latest ? latest.title : "No reports yet"}</div><div className="mt-1 text-xs text-muted">{latest ? fmtDate(latest.publishedAt || latest.updatedAt) : "A report will appear after a verification run completes."}</div></Panel>
+        <Panel><div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Needs attention</div><div className="mt-2 text-2xl font-semibold text-fg">{attentionCount}</div><div className="mt-1 text-xs text-muted">Reports whose attached verification reported failure, block, or incomplete execution.</div></Panel>
         <Panel><div className="text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Report types</div><div className="mt-2 text-sm font-semibold text-fg">{typeCounts.length ? typeCounts.map((t) => `${t.type}: ${t.count}`).join(" Â· ") : "None"}</div><div className="mt-1 text-xs text-muted">Counts from existing persisted report metadata.</div></Panel>
       </section>
 
-      <Panel title="Reports library" description="Search and filter real published reports. Open a report for details, source references, and existing actions.">
+      <Panel title="Reports library" description="Search and filter real verification reports. Open a report for details, source references, and existing actions.">
         <form action="/reports" method="get" className="grid gap-3 lg:grid-cols-[1.2fr_0.8fr_0.8fr_0.8fr_0.8fr_auto] mb-4">
           <label className="block"><div className="mb-1 text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Search</div><input name="q" defaultValue={q} placeholder="Title, project, summary, outcome" className="w-full rounded-lg border border-border bg-bg/30 px-3 py-2 text-sm text-fg" /></label>
           <label className="block"><div className="mb-1 text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Type</div><select name="type" defaultValue={typeFilter} className="w-full rounded-lg border border-border bg-bg/30 px-3 py-2 text-sm text-fg"><option value="all">All types</option>{types.map((t) => <option key={t} value={t}>{t}</option>)}</select></label>
           <label className="block"><div className="mb-1 text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Project</div><select name="project" defaultValue={projectFilter} className="w-full rounded-lg border border-border bg-bg/30 px-3 py-2 text-sm text-fg"><option value="all">All projects</option>{projectOptions.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
-          <label className="block"><div className="mb-1 text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Status</div><select name="status" defaultValue={statusFilter} className="w-full rounded-lg border border-border bg-bg/30 px-3 py-2 text-sm text-fg"><option value="all">All statuses</option><option value="published">Published</option><option value="attention">Needs attention</option></select></label>
+          <label className="block"><div className="mb-1 text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Status</div><select name="status" defaultValue={statusFilter} className="w-full rounded-lg border border-border bg-bg/30 px-3 py-2 text-sm text-fg"><option value="all">All statuses</option><option value="ready">Ready</option><option value="attention">Needs attention</option></select></label>
           <label className="block"><div className="mb-1 text-[10px] font-tech uppercase tracking-[0.14em] text-muted">Sort</div><select name="sort" defaultValue={sort} className="w-full rounded-lg border border-border bg-bg/30 px-3 py-2 text-sm text-fg"><option value="newest">Newest</option><option value="oldest">Oldest</option><option value="title">Title</option></select></label>
           <div className="flex items-end gap-2"><button type="submit" className="rounded-lg border border-border bg-bg/30 px-3 py-2 text-sm text-fg hover:border-accent/40">Apply</button><Link href="/reports" className="rounded-lg border border-border bg-bg/10 px-3 py-2 text-sm text-muted hover:text-fg">Clear</Link></div>
         </form>
 
         {reports.length === 0 ? (
-          <EmptyState title="No published reports yet" detail="Published report records will appear here after they are generated from real project activity and verification evidence. If no report has been published, there is no report to show here." />
+          <EmptyState title="No verification reports yet" detail="Completed verification runs will appear here automatically." />
         ) : filtered.length === 0 ? (
           <EmptyState title="No reports match these filters" detail="Try a different search, type, project, or status filter. Only real persisted reports are shown." />
         ) : (
@@ -212,7 +232,7 @@ export default async function ReportsSection({
                         </td>
                         <td className="px-3 py-3 align-top text-xs text-muted">{projectName}</td>
                         <td className="px-3 py-3 align-top text-xs text-muted">{fmtDate(s.publishedAt || s.updatedAt)}</td>
-                        <td className="px-3 py-3 align-top"><span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-tech uppercase tracking-[0.12em] ${attention ? "border-amber-500/25 bg-amber-500/10 text-amber-300" : "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"}`}>{attention ? "Needs attention" : "Published"}</span></td>
+                        <td className="px-3 py-3 align-top"><span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-tech uppercase tracking-[0.12em] ${attention ? "border-rose-500/25 bg-rose-500/10 text-rose-300" : "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"}`}>{attention ? "Needs attention" : "Ready"}</span></td>
                         <td className="px-3 py-3 align-top"><Link href={buildHref({ report: s.id })} className="text-xs text-accent underline">Open</Link></td>
                       </tr>
                     );
@@ -227,7 +247,7 @@ export default async function ReportsSection({
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-tech uppercase tracking-[0.12em] ${reportNeedsAttention(selected) ? "border-amber-500/25 bg-amber-500/10 text-amber-300" : "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"}`}>{reportNeedsAttention(selected) ? "Needs attention" : "Published"}</span>
+                        <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-tech uppercase tracking-[0.12em] ${reportNeedsAttention(selected) ? "border-rose-500/25 bg-rose-500/10 text-rose-300" : "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"}`}>{reportNeedsAttention(selected) ? "Needs attention" : "Ready"}</span>
                         <span className="rounded-full border border-border bg-bg/30 px-2 py-0.5 text-[10px] font-tech uppercase tracking-[0.12em] text-muted">{reportType(selected)}</span>
                       </div>
                       <h2 className="mt-2 text-lg font-semibold text-fg">{selected.title}</h2>
@@ -238,11 +258,19 @@ export default async function ReportsSection({
                     </div>
                   </div>
 
+                  <ReportActions
+                    reportId={selected.id}
+                    aiReport={selected.aiReport}
+                    prompts={selectedPrompts}
+                  />
+
                   <div className="grid gap-3 sm:grid-cols-2">
                     <div className="rounded-lg border border-border/70 bg-bg/15 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Project</div><div className="mt-1 text-sm text-fg">{selectedProjectName}</div></div>
-                    <div className="rounded-lg border border-border/70 bg-bg/15 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Generated / published</div><div className="mt-1 text-sm text-fg">{fmtDate(selected.publishedAt || selected.updatedAt)}</div></div>
-                    <div className="rounded-lg border border-border/70 bg-bg/15 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Published verification snapshot</div><div className="mt-1 text-sm text-fg">{selectedVerificationSnapshot ? `${outcomeLabel(selectedVerificationSnapshot.outcome)}${selected.publishedAt ? ` · published ${fmtDate(selected.publishedAt)}` : ""}` : "No verification snapshot stored"}</div><div className="mt-1 text-[11px] text-muted">Historical publication snapshot; not rewritten by later checks.</div></div>
-                    <div className="rounded-lg border border-border/70 bg-bg/15 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Current linked verification</div><div className="mt-1 text-sm text-fg">{selectedCurrentVerification ? `${outcomeLabel(selectedCurrentVerification.outcome)}${selectedCurrentVerification.finishedAt ? ` · ${fmtDate(selectedCurrentVerification.finishedAt)}` : ""}` : "Current record unavailable in this scope"}</div><div className="mt-1 text-[11px] text-muted">Current status shown separately and may differ from publication.</div></div>
+                    <div className="rounded-lg border border-border/70 bg-bg/15 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Generated / completed</div><div className="mt-1 text-sm text-fg">{fmtDate(selected.publishedAt || selected.updatedAt)}</div></div>
+                    <div className="rounded-lg border border-border/70 bg-bg/15 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Detected issues</div><div className={`mt-1 text-sm font-medium ${selectedIssues.length > 0 ? "text-rose-300" : "text-fg"}`}>{selectedIssues.length}</div><div className="mt-1 text-[11px] text-muted">Stored report findings.</div></div>
+                    <div className="rounded-lg border border-border/70 bg-bg/15 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">AI analysis</div><div className="mt-1 text-sm text-fg">{selected.aiReport ? "Generated" : "Not generated"}</div><div className="mt-1 text-[11px] text-muted">Stored separately from original findings.</div></div>
+                    <div className="rounded-lg border border-border/70 bg-bg/15 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Verification snapshot</div><div className="mt-1 text-sm text-fg">{selectedVerificationSnapshot ? `${outcomeLabel(selectedVerificationSnapshot.outcome)}${selected.publishedAt ? ` · completed ${fmtDate(selected.publishedAt)}` : ""}` : "No verification snapshot stored"}</div><div className="mt-1 text-[11px] text-muted">Historical verification snapshot; not rewritten by later checks.</div></div>
+                    <div className="rounded-lg border border-border/70 bg-bg/15 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Current linked verification</div><div className="mt-1 text-sm text-fg">{selectedCurrentVerification ? `${outcomeLabel(selectedCurrentVerification.outcome)}${selectedCurrentVerification.finishedAt ? ` · ${fmtDate(selectedCurrentVerification.finishedAt)}` : ""}` : "Current record unavailable in this scope"}</div><div className="mt-1 text-[11px] text-muted">Current status shown separately and may differ from the report.</div></div>
                     <div className="rounded-lg border border-border/70 bg-bg/15 p-3"><div className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Source</div><div className="mt-1 text-sm text-fg">{selected.source.repo || "Repository not recorded"}{selected.source.observationSource ? ` Â· ${selected.source.observationSource}` : ""}</div></div>
                   </div>
 
@@ -262,11 +290,11 @@ export default async function ReportsSection({
                   <div className="rounded-lg border border-border/70 bg-bg/15 p-3">
                     <div className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Confirmed findings / checks</div>
                     <div className="mt-2 space-y-2 text-sm text-muted">
-                      {selectedInvestigations.length > 0 ? selectedInvestigations.map((inv) => (
+                      {selectedIssues.length > 0 ? selectedIssues.map((inv) => (
                         <div key={inv.id} className="rounded-md border border-border/60 bg-bg/20 p-2">
-                          <div className="text-fg/90 font-medium">{inv.title}</div>
+                          <div className="text-rose-200 font-medium">{inv.title}</div>
                           <div className="text-xs text-muted mt-1">{inv.simpleExplanation || inv.technicalExplanation}</div>
-                          <div className="text-xs text-muted mt-1">Status: {inv.status} Â· Severity: {inv.severity || "not set"}</div>
+                          <div className="text-xs text-muted mt-1">Status: {inv.status} · Severity: {inv.severity || "not set"}</div>
                         </div>
                       )) : selected.verification?.outcome === "failed" ? (
                         <div>Verification reported a problem, but no linked investigation record was found in scoped records.</div>
@@ -293,7 +321,7 @@ export default async function ReportsSection({
                       <div><dt className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Project ID</dt><dd className="text-fg/90 break-all">{selectedProjectId || "Not linked"}</dd></div>
                       <div><dt className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Created</dt><dd className="text-fg/90">{fmtDate(selected.createdAt)}</dd></div>
                       <div><dt className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Updated</dt><dd className="text-fg/90">{fmtDate(selected.updatedAt)}</dd></div>
-                      <div><dt className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Published</dt><dd className="text-fg/90">{fmtDate(selected.publishedAt)}</dd></div>
+                      <div><dt className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Completed</dt><dd className="text-fg/90">{fmtDate(selected.publishedAt)}</dd></div>
                       <div><dt className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Generation source</dt><dd className="text-fg/90">{selected.generationSource || "Not recorded"}</dd></div>
                       <div><dt className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Commits referenced</dt><dd className="text-fg/90">{selected.source.commits.length}</dd></div>
                       <div className="sm:col-span-2"><dt className="text-[10px] font-tech uppercase tracking-[0.12em] text-muted">Changed files</dt><dd className="text-fg/90 break-words">{selected.source.changedFiles?.length ? selected.source.changedFiles.join(", ") : "None recorded"}</dd></div>
@@ -315,9 +343,9 @@ export default async function ReportsSection({
         )}
       </Panel>
 
-      <Panel title="Report generation" description="Report generation uses existing published report records and verification evidence. This page does not create fake reports or synthetic success states.">
+      <Panel title="Report generation" description="Report generation uses existing report records and verification evidence. This page does not create fake reports or synthetic success states.">
         <div className="text-sm text-muted space-y-2">
-          <p>Reports are generated from real project activity and verification evidence. Published report records appear here without inventing report content.</p>
+          <p>Reports are generated from real project activity and verification evidence. Report records appear here without inventing report content.</p>
           <p>If required source data is missing, Verification will show the missing/blocked state; Reports will not invent report content.</p>
         </div>
       </Panel>

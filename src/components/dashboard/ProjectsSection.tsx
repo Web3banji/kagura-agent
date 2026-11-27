@@ -244,7 +244,7 @@ export default function ProjectsSection() {
                 const selected = p.id === selectedProjectId;
                 return (
                   <li key={p.id}>
-                    <button type="button" onClick={() => setSelectedProjectId(p.id)} className={`w-full text-left rounded-lg border p-4 transition ${selected ? "border-accent/40 bg-accent-soft/10" : "border-border bg-panel-2/20 hover:border-border-strong"}`}>
+                    <button type="button" onClick={() => setSelectedProjectId(p.id)} className={`w-full text-left rounded-xl border p-4 transition ${selected ? "border-accent/60 bg-accent-soft/15 shadow-sm" : "border-border bg-panel-2/20 hover:border-border-strong hover:bg-panel-2/30"}`}>
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">

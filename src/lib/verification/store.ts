@@ -1,7 +1,7 @@
 import type { VerificationOutcome, VerificationRecord } from "@/types/verification";
 import { promises as fs } from "fs";
 import path from "path";
-import { hasDatabase, isProductionRuntime, kvGet, kvSet } from "@/lib/db";
+import { hasDatabase, isProductionRuntime, kvGet, kvMutate } from "@/lib/db";
 import { AccessDeniedError } from "@/lib/auth/scope";
 
 const DATA_DIR = path.join(process.cwd(), "data", "verification");
@@ -13,6 +13,17 @@ function recordsKey(projectId?: string) {
 
 function canUseLocalFs(): boolean {
   return !hasDatabase() && !isProductionRuntime();
+}
+
+let fileMutationTail: Promise<void> = Promise.resolve();
+
+async function withFileMutationLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = fileMutationTail.then(fn, fn);
+  fileMutationTail = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
 }
 
 async function ensureDir() {
@@ -73,7 +84,7 @@ async function readDbRecords(projectId?: string): Promise<VerificationRecord[]> 
 }
 
 async function writeDbRecords(records: VerificationRecord[], projectId?: string): Promise<void> {
-  await kvSet(recordsKey(projectId), records.slice(0, 500));
+  await kvMutate<VerificationRecord[]>(recordsKey(projectId), () => records.slice(0, 500));
 }
 
 async function readFileRecords(): Promise<VerificationRecord[]> {
@@ -84,9 +95,6 @@ async function readFileRecords(): Promise<VerificationRecord[]> {
     const parsed = JSON.parse(raw) as VerificationRecord[];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
-    try {
-      await fs.writeFile(LEGACY_RECORDS_FILE, "[]", "utf8");
-    } catch {}
     return [];
   }
 }
@@ -96,7 +104,42 @@ async function writeFileRecords(records: VerificationRecord[]): Promise<void> {
     throw new Error("Durable verification record storage is not configured (DATABASE_URL missing in production).");
   }
   await ensureDir();
-  await fs.writeFile(LEGACY_RECORDS_FILE, JSON.stringify(records, null, 2), "utf8");
+  const tmp = `${LEGACY_RECORDS_FILE}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(records, null, 2), "utf8");
+  try {
+    await fs.rename(tmp, LEGACY_RECORDS_FILE);
+  } catch (error) {
+    await fs.rm(tmp, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+/**
+ * Serialize every verification-record collection mutation.
+ *
+ * PostgreSQL uses the same echolog_kv row lock as completeJobAtomically. The
+ * file fallback uses one process-wide mutation queue and atomic rename writes.
+ */
+export async function mutateVerificationRecords<T>(
+  projectId: string | undefined,
+  mutator: (records: VerificationRecord[]) => { records: VerificationRecord[]; value: T },
+): Promise<T> {
+  if (hasDatabase()) {
+    let value: T | undefined;
+    await kvMutate<VerificationRecord[]>(recordsKey(projectId), (current) => {
+      const records = Array.isArray(current) ? current : [];
+      const result = mutator(records);
+      value = result.value;
+      return result.records.slice(0, 500);
+    });
+    return value as T;
+  }
+  return withFileMutationLock(async () => {
+    const records = await readFileRecords();
+    const result = mutator(records);
+    await writeFileRecords(result.records);
+    return result.value;
+  });
 }
 
 export async function readVerificationRecords(opts?: { projectId?: string; requestedBy?: string; includeLegacy?: boolean }): Promise<VerificationRecord[]> {
@@ -140,21 +183,15 @@ export async function __unsafeWriteVerificationRecordsForTests(records: Verifica
     await writeDbRecords(records, projectId);
     return;
   }
-  await writeFileRecords(records);
+  await withFileMutationLock(() => writeFileRecords(records));
 }
 
 export async function appendVerificationRecord(record: VerificationRecord): Promise<VerificationRecord> {
   const projectId = record.projectId;
-  if (hasDatabase()) {
-    const records = await readDbRecords(projectId);
+  return mutateVerificationRecords(projectId, (records) => {
     records.unshift(record);
-    await writeDbRecords(records, projectId);
-    return record;
-  }
-  const records = await readFileRecords();
-  records.unshift(record);
-  await writeFileRecords(records);
-  return record;
+    return { records, value: record };
+  });
 }
 
 /**
@@ -217,20 +254,12 @@ export async function upsertVerificationRecord(
     return { ...incoming, requestedBy: expectOwner ?? incoming.requestedBy, jobId: expectedJobId ?? incoming.jobId, projectId: expectedProjectId !== undefined ? expectedProjectId ?? undefined : incoming.projectId };
   };
 
-  if (hasDatabase()) {
-    const records = await readDbRecords(projectId);
+  return mutateVerificationRecords(projectId, (records) => {
     const idx = records.findIndex((r) => r.id === record.id || (record.jobId && r.jobId === record.jobId));
     if (idx >= 0) records[idx] = merge(records[idx], record);
     else records.unshift(merge(undefined, record));
-    await writeDbRecords(records, projectId);
-    return record;
-  }
-  const records = await readFileRecords();
-  const idx = records.findIndex((r) => r.id === record.id || (record.jobId && r.jobId === record.jobId));
-  if (idx >= 0) records[idx] = merge(records[idx], record);
-  else records.unshift(merge(undefined, record));
-  await writeFileRecords(records);
-  return record;
+    return { records, value: record };
+  });
 }
 
 export async function getVerificationRecord(id: string, opts: { projectId?: string; requestedBy?: string; includeLegacy?: boolean }): Promise<VerificationRecord | undefined> {

@@ -151,7 +151,7 @@ async function main() {
     assert.equal(reclaimed?.claimedBy, 'runner-b');
     const stale = await call('complete', { jobId: job.id, runnerId:'runner-a', exitCode:1, runEnd:{status:'failed'}, summary:'stale' });
     check('stale runner cannot complete reclaimed job', stale.status === 403 || stale.status === 409);
-    const fresh = await call('complete', { jobId: job.id, runnerId:'runner-b', exitCode:0, runEnd:{status:'passed'}, summary:'fresh pass' });
+    const fresh = await call('complete', { jobId: job.id, runnerId:'runner-b', exitCode:0, runEnd:{type:'run_end',status:'passed'}, summary:'fresh pass' });
     check('new runner can complete reclaimed job', fresh.status === 200);
     const recs = await readVerificationRecords({ requestedBy:'u1', includeLegacy:false });
     check('new runner result preserved', recs.length===1 && recs[0].outcome === 'passed');
@@ -184,6 +184,57 @@ async function main() {
     const job = await enqueueJob({ flow:'shell-nav', objective:'obj', url:'http://localhost:3000', projectId:'p1', requestedBy:'u1', headless:true, timeout:60, reason:'test' });
     const r = await call('complete', { jobId: job.id, runnerId:'runner-a', exitCode:1, runEnd:{status:'failed'} });
     check('pending unclaimed job cannot be completed', r.status===403 || r.status===409);
+  }
+
+  await reset();
+  // caller-provided passed without run_end must not pass
+  {
+    const job = await makeClaimed('u1','p1','runner-a');
+    const r = await call('complete', { jobId: job.id, runnerId:'runner-a', exitCode:0, outcome:'passed', summary:'claimed pass' });
+    check('missing run_end rejects provided passed', r.status===200 && r.json?.job?.status==='failed');
+    const recs = await readVerificationRecords({ requestedBy:'u1', includeLegacy:false });
+    check('missing run_end record is not passed', recs.length===1 && recs[0].outcome!=='passed' && recs[0].runEnd===undefined);
+  }
+
+  await reset();
+  // malformed run_end must not pass
+  {
+    const job = await makeClaimed('u1','p1','runner-a');
+    const r = await call('complete', { jobId: job.id, runnerId:'runner-a', exitCode:0, outcome:'passed', runEnd:{status:'passed'}, summary:'malformed pass' });
+    check('malformed run_end rejects passed', r.status===200 && r.json?.job?.status==='failed');
+    const recs = await readVerificationRecords({ requestedBy:'u1', includeLegacy:false });
+    check('malformed run_end record is not passed', recs.length===1 && recs[0].outcome!=='passed');
+  }
+
+  await reset();
+  // genuine run_end passed still passes
+  {
+    const job = await makeClaimed('u1','p1','runner-a');
+    const r = await call('complete', { jobId: job.id, runnerId:'runner-a', exitCode:0, outcome:'passed', runEnd:{type:'run_end',status:'passed'}, summary:'genuine pass' });
+    check('genuine run_end passed accepted', r.status===200 && r.json?.job?.status==='completed');
+    const recs = await readVerificationRecords({ requestedBy:'u1', includeLegacy:false });
+    check('genuine run_end record is passed', recs.length===1 && recs[0].outcome==='passed');
+  }
+
+  await reset();
+  // genuine timeout and did_not_start classifications remain intact
+  {
+    const timeoutJob = await makeClaimed('u1','p1','runner-a');
+    const timeout = await call('complete', { jobId: timeoutJob.id, runnerId:'runner-a', exitCode:3, runEnd:{type:'run_end',status:'timeout'}, summary:'timeout' });
+    check('genuine timeout remains timeout', timeout.status===200 && timeout.json?.job?.status==='failed');
+
+    const notStartedJob = await makeClaimed('u1','p1','runner-a');
+    const notStarted = await call('complete', { jobId: notStartedJob.id, runnerId:'runner-a', exitCode:2, runEnd:{type:'run_end',status:'did_not_start'}, summary:'not started' });
+    check('genuine did_not_start remains did_not_start', notStarted.status===200 && notStarted.json?.job?.status==='did_not_start');
+  }
+
+  await reset();
+  // confirmed cancellation remains cancelled
+  {
+    const job = await makeClaimed('u1','p1','runner-a');
+    await updateJob(job.id, { status:'cancelling' });
+    const cancelled = await call('complete', { jobId: job.id, runnerId:'runner-a', cancelConfirmed:true });
+    check('confirmed cancellation remains cancelled', cancelled.status===200 && cancelled.json?.job?.status==='cancelled');
   }
 
   console.log(`\n${passed} checks passed`);

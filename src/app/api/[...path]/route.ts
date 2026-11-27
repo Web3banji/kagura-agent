@@ -4,6 +4,7 @@ import { GET as authGET, POST as authPOST } from "@/app/api/auth/[[...path]]/han
 import { GET as githubGET, POST as githubPOST, DELETE as githubDELETE } from "@/app/api/github/[[...path]]/handler";
 import { GET as investigationsGET, POST as investigationsPOST, PATCH as investigationsPATCH } from "@/app/api/investigations/[[...path]]/handler";
 import { GET as projectsGET, POST as projectsPOST, PATCH as projectsPATCH, DELETE as projectsDELETE } from "@/app/api/projects/[[...path]]/handler";
+import { POST as reportsPOST } from "@/app/api/reports/[...path]/handler";
 import { GET as targetAuthGET, PATCH as targetAuthPATCH } from "@/app/api/projects/[projectId]/target-auth/handler";
 import { GET as runnerGET, POST as runnerPOST } from "@/app/api/runner/[...path]/handler";
 import { GET as verificationGET, POST as verificationPOST } from "@/app/api/verification/[...path]/handler";
@@ -51,6 +52,7 @@ export async function POST(req: Request, ctx: Ctx) {
     case "github": return githubPOST(req, { params: { path: rel } });
     case "investigations": return investigationsPOST(req, { params: { path: rel } });
     case "projects": return projectsPOST(req, { params: { path: rel } });
+    case "reports": return reportsPOST(req, { params: { path: rel } });
     case "runner": return runnerPOST(req, { params: { path: rel } });
     case "verification": return verificationPOST(req, { params: { path: rel } });
     default: return notFound();

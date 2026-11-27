@@ -14,15 +14,19 @@ function isValidOutcome(v: unknown): v is VerificationOutcome {
   return v === "pending" || v === "running" || v === "passed" || v === "failed" || v === "blocked" || v === "did_not_start" || v === "timeout";
 }
 
-function normalizeOutcome(exitCode: unknown, runEndStatus: unknown, provided: unknown): VerificationOutcome {
+function isValidPassedRunEnd(runEnd: Record<string, unknown> | undefined): boolean {
+  return !!runEnd && runEnd.type === "run_end" && runEnd.status === "passed";
+}
+
+function normalizeOutcome(exitCode: unknown, runEnd: Record<string, unknown> | undefined, provided: unknown): VerificationOutcome {
   const code = typeof exitCode === "number" ? exitCode : null;
-  const status = typeof runEndStatus === "string" ? runEndStatus : undefined;
-  if (code === 0 && status === "passed") return "passed";
+  const status = typeof runEnd?.status === "string" ? runEnd.status : undefined;
+  if (code === 0 && isValidPassedRunEnd(runEnd)) return "passed";
   if (code === 1) return "failed";
   if (code === 2) return "did_not_start";
   if (code === 3) return "timeout";
   if (status === "failed") return "failed";
-  if (isValidOutcome(provided) && provided !== "pending" && provided !== "running") return provided;
+  if (isValidOutcome(provided) && provided !== "pending" && provided !== "running" && provided !== "passed") return provided;
   return "blocked";
 }
 
@@ -128,8 +132,7 @@ async function handleComplete(req: Request) {
       return NextResponse.json({ ok: true, job: cancelled });
     }
     const runEnd = body.runEnd && typeof body.runEnd === "object" ? (body.runEnd as Record<string, unknown>) : undefined;
-    const runEndStatus = runEnd?.status;
-    const outcome = normalizeOutcome(body.exitCode, runEndStatus, body.outcome);
+    const outcome = normalizeOutcome(body.exitCode, runEnd, body.outcome);
     const finishedAt = typeof body.finishedAt === "string" ? body.finishedAt : new Date().toISOString();
     const startedAt = typeof body.startedAt === "string" ? body.startedAt : job.startedAt || job.claimedAt || job.createdAt;
     const result: VerificationJobResult = {
@@ -249,7 +252,7 @@ async function handleComplete(req: Request) {
     if (outcome === "passed") {
       try { await markRunnerSuccess(finishedAt); } catch { /* heartbeat persistence is best-effort; completion already persisted */ }
     }
-    return NextResponse.json({ ok: true, job: updated, record: { ...persisted, investigationIds, investigationProcessing: { ...(persisted.investigationProcessing || {}), state: investigationState } }, investigationProcessed: investigationState === "processed", agentRunReconciliation });
+    return NextResponse.json({ ok: true, job: updated, record: { ...persisted, investigationIds, investigationProcessing: { ...(persisted.investigationProcessing || {}), state: investigationState } }, investigationProcessed: investigationState === "processed", agentRunReconciliation, report: completion.report });
   } catch (err) {
     return NextResponse.json({ error: err instanceof Error ? err.message : String(err) }, { status: 500 });
   }

@@ -207,10 +207,22 @@ export async function runProcess(command, args, { timeoutMs = 10000 } = {}) {
   });
 }
 
+function resolveRunnerAccount() {
+  const domain = process.env.USERDOMAIN;
+  const user = process.env.USERNAME || process.env.USER;
+  if (domain && user) return `${domain}\\${user}`;
+  try {
+    const username = os.userInfo().username;
+    if (username) return username;
+  } catch {}
+  return user || "";
+}
+
 export async function prepareSandboxPasswordFile({
   password,
   sandboxUser,
   pwFile,
+  currentUser = resolveRunnerAccount(),
   writeFile = fs.writeFile,
   removeFile = fs.rm,
   run = runProcess,
@@ -219,19 +231,21 @@ export async function prepareSandboxPasswordFile({
     throw new Error("sandbox password is unavailable");
   }
   if (!sandboxUser) throw new Error("sandbox user is unavailable");
+  if (!currentUser) throw new Error("runner account is unavailable");
   try {
     await writeFile(pwFile, password, { encoding: "utf8", mode: 0o600 });
   } catch (err) {
     await removeFile(pwFile, { force: true }).catch(() => {});
     throw new Error(`sandbox password file could not be created: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const acl = await run("icacls", [pwFile, "/inheritance:r", "/grant:r", `${sandboxUser}:(R)`, "/grant:r", "SYSTEM:(R)"], { timeoutMs: 10000 });
+  const acl = await run("icacls", [pwFile, "/inheritance:r", "/grant:r", `${sandboxUser}:(R)`, "/grant:r", "SYSTEM:(R)", "/grant:r", `${currentUser}:(R)`], { timeoutMs: 10000 });
   if (acl.code !== 0 || acl.timedOut) {
     await removeFile(pwFile, { force: true }).catch(() => {});
     throw new Error(`sandbox password ACL protection failed: ${acl.stderr || acl.code || "unknown error"}`);
   }
   const verify = await run("icacls", [pwFile], { timeoutMs: 10000 });
-  if (verify.code !== 0 || verify.timedOut || !String(verify.stdout).toLowerCase().includes(sandboxUser.toLowerCase())) {
+  const verifyText = String(verify.stdout || "").toLowerCase();
+  if (verify.code !== 0 || verify.timedOut || !verifyText.includes(sandboxUser.toLowerCase()) || !verifyText.includes(currentUser.toLowerCase())) {
     await removeFile(pwFile, { force: true }).catch(() => {});
     throw new Error("sandbox password ACL verification failed");
   }

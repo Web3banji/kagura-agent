@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -43,7 +44,7 @@ async function main() {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "kagura-sandbox-test-"));
     const pwFile = path.join(dir, "pw.txt");
     let removed = 0;
-    const removeFile = async () => { removed++; };
+    const removeFile = async (file, opts) => { removed++; await fs.rm(file, opts); };
     await assert.rejects(
       prepareSandboxPasswordFile({
         password: "super-secret",
@@ -54,22 +55,102 @@ async function main() {
       }),
       /ACL protection failed/,
     );
-    check("password ACL failure aborts and cleans up", removed === 1);
+    const stillExists = await fs.access(pwFile).then(() => true, () => false);
+    check("password ACL failure aborts and cleans up", removed === 1 && !stillExists);
     await fs.rm(dir, { recursive: true, force: true });
   }
 
   {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "kagura-sandbox-test-"));
     const pwFile = path.join(dir, "pw.txt");
+    const currentAccount = process.env.USERDOMAIN && process.env.USERNAME
+      ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
+      : os.userInfo().username;
     let calls = 0;
     const run = async () => {
       calls++;
       return calls === 1
         ? { code: 0, stdout: "", stderr: "" }
-        : { code: 0, stdout: "S:(R)", stderr: "" };
+        : { code: 0, stdout: `S:(R) ${currentAccount}:(R)`, stderr: "" };
     };
     await prepareSandboxPasswordFile({ password: "super-secret", sandboxUser: "S", pwFile, run });
     check("password ACL success verifies account access", calls === 2);
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+
+  {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "kagura-sandbox-test-"));
+    const pwFile = path.join(dir, "pw.txt");
+    const password = "super-secret";
+    const sandboxUser = "KAGURA_SANDBOX";
+    const currentAccount = process.env.USERDOMAIN && process.env.USERNAME
+      ? `${process.env.USERDOMAIN}\\${process.env.USERNAME}`
+      : os.userInfo().username;
+
+    await prepareSandboxPasswordFile({ password, sandboxUser, pwFile });
+
+    const parentRead = await fs.readFile(pwFile, "utf8");
+    check("parent runner account can read generated password file", parentRead === password);
+
+    const acl = await runProcess("icacls", [pwFile], { timeoutMs: 10000 });
+    const aclText = String(acl.stdout || "").toLowerCase();
+    check("ACL grants parent runner account read access", acl.code === 0 && aclText.includes(currentAccount.toLowerCase()));
+    check("ACL retains sandbox account read access", aclText.includes(sandboxUser.toLowerCase()));
+    check("ACL retains SYSTEM read access", aclText.includes("nt authority\\system"));
+    check("ACL does not grant broad groups", !/everyone|builtin\\users|authenticated users/.test(aclText));
+
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+
+  {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "kagura-sandbox-test-"));
+    const pwFile = path.join(dir, "pw.txt");
+    const password = "super-secret";
+    await prepareSandboxPasswordFile({ password, sandboxUser: "KAGURA_SANDBOX", pwFile });
+
+    const safePath = pwFile.replace(/'/g, "''");
+    const script = `$sec = Get-Content -Raw '${safePath}' | ConvertTo-SecureString -AsPlainText -Force; if ($sec.Length -ne ${password.length}) { exit 1 }; Write-Output ok`;
+    const consumed = await runProcess("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { timeoutMs: 10000 });
+    check("PowerShell can consume generated password file", consumed.code === 0 && String(consumed.stdout).includes("ok"));
+
+    await fs.rm(dir, { recursive: true, force: true });
+  }
+
+  {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "kagura-sandbox-test-"));
+    const workspacesRoot = path.join(dir, "workspaces");
+    const profilesRoot = path.join(dir, "profiles");
+    let removedPath = "";
+    const removeFile = async (file, opts) => {
+      if (String(file).includes("kagura-sandbox-pw-")) removedPath = String(file);
+      await fs.rm(file, opts);
+    };
+    const spawn = () => {
+      const child = new EventEmitter();
+      child.stdout = new EventEmitter();
+      child.stderr = new EventEmitter();
+      setImmediate(() => {
+        child.stdout.emit("data", Buffer.from(""));
+        child.stderr.emit("data", Buffer.from(""));
+        child.emit("close", 0, null);
+      });
+      return child;
+    };
+
+    await executeKaneJob(
+      { id: "acl-cleanup-job", flow: "shell-nav", objective: "objective", url: "https://example.com", projectId: "p1", requestedBy: "u1", headless: true, timeout: 60 },
+      "runner-test",
+      async () => {},
+      {
+        isolation: { mode: "account", sandboxUser: "KAGURA_SANDBOX", sandboxPassword: "test-password", workspacesRoot, profilesRoot, repoRoot: process.cwd(), isolateAllJobs: false },
+        assessment: { ok: true, sandboxUser: "KAGURA_SANDBOX" },
+        spawn,
+        removeFile,
+      },
+    );
+
+    const cleaned = removedPath && await fs.access(removedPath).then(() => false, () => true);
+    check("successful sandboxed execution cleans password file", !!cleaned);
     await fs.rm(dir, { recursive: true, force: true });
   }
 

@@ -168,13 +168,13 @@ export default async function SettingsSection() {
             <div className="flex items-center justify-between gap-2"><div><div className="text-sm font-medium text-fg">AI provider</div><div className="text-xs text-muted">Used for drafting assistance. Generated content must remain grounded in real evidence.</div></div><StatePill state={aiState} /></div>
             <div className="grid gap-2 sm:grid-cols-2 text-xs text-muted">
               <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Provider</div><div className="mt-1 text-fg/90">{ai.configured ? ai.provider || "Configured" : "Not configured"}</div></div>
-              <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Model</div><div className="mt-1 text-fg/90">{process.env.AI_MODEL ? process.env.AI_MODEL : "Default / provider-managed"}</div></div>
+              <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Model</div><div className="mt-1 text-fg/90">{process.env.GEMINI_MODEL || process.env.AI_MODEL || "Default / provider-managed"}</div></div>
               <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Availability</div><div className="mt-1 text-fg/90">{ai.configured ? "AI drafting available" : "Template fallback available"}</div></div>
               <div className="rounded-md border border-border/60 bg-bg/20 p-2"><div className="font-tech uppercase tracking-[0.12em] text-[10px]">Secrets</div><div className="mt-1 text-fg/90">API keys are never shown</div></div>
             </div>
             <div className="rounded-md border border-border/70 bg-bg/15 p-3 text-xs text-muted">
               <div className="font-medium text-fg">Operator-managed configuration</div>
-              <p className="mt-1">AI provider keys/models are configured through server environment variables (e.g., `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, optional `AI_PROVIDER`, `AI_MODEL`). Configure them outside the UI; do not paste secrets into the app.</p>
+              <p className="mt-1">AI provider keys/models are configured through server environment variables (e.g., `GEMINI_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, optional `AI_PROVIDER`, `GEMINI_MODEL`, `AI_MODEL`). Configure them outside the UI; do not paste secrets into the app.</p>
             </div>
           </div>
         </div>
@@ -204,8 +204,8 @@ export default async function SettingsSection() {
         <Panel title="Notifications and preferences" description="Only preferences with real existing behavior are shown.">
           <div className="space-y-3">
             <div className="rounded-lg border border-border/70 bg-bg/20 p-3">
-              <div className="text-sm font-medium text-fg">Publishing control</div>
-              <p className="mt-1 text-xs text-muted">Publishing is manual and already implemented: report records are published only through explicit review/publish actions. No automatic publishing toggle is exposed because it is not implemented.</p>
+              <div className="text-sm font-medium text-fg">Report generation</div>
+              <p className="mt-1 text-xs text-muted">Completed verification runs create a report automatically. Reports are generated from stored verification evidence; no separate publishing toggle is exposed.</p>
             </div>
             <div className="rounded-lg border border-border/70 bg-bg/20 p-3">
               <div className="text-sm font-medium text-fg">Notifications</div>

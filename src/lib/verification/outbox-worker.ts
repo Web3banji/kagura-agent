@@ -8,6 +8,21 @@ export type DrainResult = { processed: number; failed: number; skipped: number; 
 
 function backoffMs(attempt: number): number { return Math.min(5 * 60_000, 15_000 * Math.max(1, attempt)); }
 
+function reportFailureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function logReportCreationFailure(error: unknown, item: VerificationProcessingOutbox): void {
+  console.error(JSON.stringify({
+    event: "verification_report_create_failed",
+    jobId: item.jobId,
+    verificationId: item.recordId,
+    projectId: item.projectId,
+    outboxId: item.id,
+    error: reportFailureMessage(error),
+  }));
+}
+
 type OutboxRepositoryDeps = {
   getRepositoryConnectionForUser?: typeof getRepositoryConnectionForUser;
   resolveActiveRepositoryConnectionId?: typeof resolveActiveRepositoryConnectionId;
@@ -74,6 +89,16 @@ export async function processOutboxItem(item: VerificationProcessingOutbox, work
   }
   const existing = record.investigationProcessing?.state;
   if (existing === "processed") {
+    try {
+      const { ensureVerificationReport } = await import("@/lib/reports/store");
+      const reportStory = await ensureVerificationReport(record);
+      if (!reportStory) throw new Error("verification report was not created");
+    } catch (error) {
+      const message = reportFailureMessage(error);
+      logReportCreationFailure(error, item);
+      await markVerificationProcessingFailed(item.id, { workerId, claimGeneration: item.claimGeneration, error: message, retryDelayMs: backoffMs(item.attemptCount + 1) });
+      return { status: "failed", reason: message, state: "failed" };
+    }
     await markVerificationProcessingCompleted(item.id, { workerId, claimGeneration: item.claimGeneration });
     return { status: "completed", investigationIds: record.investigationIds ?? [], state: "processed" };
   }
@@ -90,6 +115,14 @@ export async function processOutboxItem(item: VerificationProcessingOutbox, work
     }, { ownerUserId: item.ownerUserId, projectId: item.projectId, repositoryConnectionId });
     const investigationIds = resultInv.investigations.map(i => i.id);
     await upsertVerificationRecord({ ...record, investigationIds, investigationProcessing: { state: "processed", processingStartedAt, processedAt: new Date().toISOString(), attemptCount: (record.investigationProcessing?.attemptCount ?? 0) + 1 } }, { expectOwner: item.ownerUserId, expectedJobId: item.jobId, expectedProjectId: item.projectId, expectedRecordId: item.recordId, allowReplay: false });
+    const { ensureVerificationReport } = await import("@/lib/reports/store");
+    try {
+      const reportStory = await ensureVerificationReport({ ...record, investigationIds });
+      if (!reportStory) throw new Error("verification report was not created");
+    } catch (error) {
+      logReportCreationFailure(error, item);
+      throw error;
+    }
     await markVerificationProcessingCompleted(item.id, { workerId, claimGeneration: item.claimGeneration });
     return { status: "completed", investigationIds, state: "processed" };
   } catch (e) {

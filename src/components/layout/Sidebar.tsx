@@ -9,7 +9,7 @@ const NAV = [
   { href: "/command-center", label: "Overview", hint: "What KAGURA is and how to start" },
   { href: "/projects", label: "Projects", hint: "Your authorized projects" },
   { href: "/verification", label: "Verification", hint: "Checks and test results" },
-  { href: "/reports", label: "Reports", hint: "Published report library" },
+  { href: "/reports", label: "Reports", hint: "Verification report library" },
   { href: "/settings", label: "Settings", hint: "Account and preferences" },
 ];
 

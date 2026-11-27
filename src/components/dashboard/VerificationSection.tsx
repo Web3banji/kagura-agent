@@ -6,7 +6,7 @@ import { readInvestigations } from "@/lib/investigations/store";
 import { readJobs, getRunnerHeartbeat } from "@/lib/verification/jobs";
 import { RerunVerificationButton } from "@/app/(dashboard)/verification/rerun-button";
 import { statusInfo } from "@/lib/ui-text";
-import { resolveProjectIdsForUser, resolveProjectId } from "@/lib/verification/context";
+import { resolveProjectIdsForUser } from "@/lib/verification/context";
 import { getServerPrincipal, principalHasLegacyAccess } from "@/lib/auth/guards";
 import { scopeForPrincipal } from "@/lib/auth/scope";
 import { getPool, ensureDb, hasDatabase } from "@/lib/db";
@@ -14,6 +14,7 @@ import type { VerificationRecord } from "@/types/verification";
 import type { Investigation } from "@/types/investigation";
 
 type ProjectMeta = { id: string; name: string; repo: string | null };
+type ProjectMetaResult = { projects: Map<string, ProjectMeta>; unavailable: boolean };
 
 function fmtDate(value?: string | null): string {
   if (!value) return "Not recorded";
@@ -57,7 +58,7 @@ function severityTone(severity: string | null | undefined): string {
   switch (severity) {
     case "critical": return "text-rose-200 bg-rose-500/15 border-rose-500/30";
     case "high": return "text-rose-300 bg-rose-500/10 border-rose-500/25";
-    case "medium": return "text-amber-300 bg-amber-500/10 border-amber-500/25";
+    case "medium": return "text-rose-200 bg-rose-500/15 border-rose-500/30";
     case "low": return "text-sky-300 bg-sky-500/10 border-sky-500/25";
     default: return "text-muted bg-white/[0.03] border-border";
   }
@@ -68,10 +69,10 @@ function severityLabel(severity: string | null | undefined): string {
   return severity.charAt(0).toUpperCase() + severity.slice(1);
 }
 
-async function resolveProjectMeta(projectIds: string[], userId: string | undefined): Promise<Map<string, ProjectMeta>> {
-  const map = new Map<string, ProjectMeta>();
-  for (const id of projectIds) map.set(id, { id, name: id, repo: null });
-  if (!hasDatabase() || !userId || projectIds.length === 0) return map;
+async function resolveProjectMeta(projectIds: string[], userId: string | undefined): Promise<ProjectMetaResult> {
+  const projects = new Map<string, ProjectMeta>();
+  if (!userId || projectIds.length === 0) return { projects, unavailable: false };
+  if (!hasDatabase()) return { projects, unavailable: true };
   try {
     await ensureDb();
     const res = await getPool().query(
@@ -83,10 +84,16 @@ async function resolveProjectMeta(projectIds: string[], userId: string | undefin
       [userId, projectIds],
     );
     for (const row of res.rows as Array<{ id: string; name: string; full_name: string | null }>) {
-      map.set(String(row.id), { id: String(row.id), name: String(row.name || row.id), repo: row.full_name ? String(row.full_name) : null });
+      projects.set(String(row.id), {
+        id: String(row.id),
+        name: String(row.name || "Unknown project"),
+        repo: row.full_name ? String(row.full_name) : null,
+      });
     }
-  } catch {}
-  return map;
+    return { projects, unavailable: false };
+  } catch {
+    return { projects, unavailable: true };
+  }
 }
 
 function investigationsForRecord(record: VerificationRecord, investigations: Investigation[]): Investigation[] {
@@ -109,15 +116,12 @@ export default async function VerificationSection() {
   const scope = scopeForPrincipal(principal, { legacyAccess: principalHasLegacyAccess(principal) });
 
   let projectIds: string[] = [];
+  let projectIdsUnavailable = false;
   if (scope.userId) {
-    try { projectIds = await resolveProjectIdsForUser(scope.userId); } catch {}
-  }
-  if (!projectIds.length) {
-    const single = await resolveProjectId();
-    if (single) projectIds.push(single);
+    try { projectIds = await resolveProjectIdsForUser(scope.userId); } catch { projectIdsUnavailable = true; }
   }
 
-  const [recordsPerProject, investigations, jobs, rawHeartbeat, projectMeta] = await Promise.all([
+  const [recordsPerProject, investigations, jobs, rawHeartbeat, projectMetaResult] = await Promise.all([
     Promise.all(projectIds.map((projectId) => readVerificationRecords({ projectId, includeLegacy: !!scope.includeLegacy, requestedBy: scope.privileged ? undefined : principal.userId }).catch(() => [] as VerificationRecord[]))),
     readInvestigations(scope).catch(() => [] as Investigation[]),
     readJobs({ requestedBy: scope.privileged ? undefined : principal.userId, includeLegacy: !!scope.includeLegacy }).catch(() => []),
@@ -125,6 +129,13 @@ export default async function VerificationSection() {
     resolveProjectMeta(projectIds, principal.userId),
   ]);
   const runnerHeartbeat = rawHeartbeat as import("@/types/verification").RunnerHeartbeat;
+  const projectMeta = projectMetaResult.projects;
+  const projectMetaUnavailable = projectMetaResult.unavailable || projectIdsUnavailable;
+  const availableProjects = projectMetaUnavailable
+    ? []
+    : projectIds
+      .map((id) => projectMeta.get(id))
+      .filter((project): project is ProjectMeta => !!project);
   const readinessLabel = !runnerHeartbeat.readiness
     ? "Unknown/unverified"
     : runnerHeartbeat.readiness.state === "ready"
@@ -161,7 +172,7 @@ export default async function VerificationSection() {
   const activeJobs = jobs.filter((j) => j.status === "pending" || j.status === "claimed" || j.status === "running");
 
   const latestProjectId = latest?.projectId || projectIds[0] || "default";
-  const latestProject = projectMeta.get(latestProjectId) || { id: latestProjectId, name: latestProjectId, repo: null };
+  const latestProject = projectMeta.get(latestProjectId) || { id: latestProjectId, name: "Unknown project", repo: null };
 
   const nextAction = (() => {
     if (activeJobs.length > 0 || incompleteRecords.length > 0) return { title: "Wait for the check to finish", detail: "A verification is queued or still running. Real results will appear here when the runner reports them.", href: "/verification", cta: "Refresh results" };
@@ -176,8 +187,24 @@ export default async function VerificationSection() {
       <PageHeader
         title="Verification"
         subtitle="See real check results, confirmed project issues, and checks that could not run. Nothing here is a guess."
-        actions={<RerunVerificationButton availableProjectIds={projectIds} />}
+        actions={<RerunVerificationButton availableProjects={availableProjects} metadataUnavailable={projectMetaUnavailable} />}
       />
+
+      <section className="rounded-xl border border-accent/25 bg-accent-soft/10 p-4 md:p-5">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="k-label text-accent/90 mb-1">KANE verification engine</div>
+            <p className="text-sm text-fg leading-relaxed">
+              Select a project, run a real browser check, then review the recorded outcome and any detected issues. KANE performs the check; KAGURA preserves the evidence.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-[11px] font-tech uppercase tracking-[0.12em] text-muted">
+            <span className="rounded border border-border bg-panel/50 px-2 py-1">1. Select project</span>
+            <span className="rounded border border-border bg-panel/50 px-2 py-1">2. Run check</span>
+            <span className="rounded border border-border bg-panel/50 px-2 py-1">3. Review issues</span>
+          </div>
+        </div>
+      </section>
 
       <section className="grid gap-4 xl:grid-cols-[1.5fr_1fr]">
         <div className={`rounded-xl border p-5 md:p-6 shadow-soft ${toneClasses(latestPlain.tone)}`}>
@@ -204,7 +231,7 @@ export default async function VerificationSection() {
             <h3 className="text-base font-semibold text-fg">{nextAction.title}</h3>
             <p className="mt-2 text-sm text-muted leading-relaxed">{nextAction.detail}</p>
             <div className="mt-4 flex flex-wrap gap-2">
-              {nextAction.href === "/verification" ? <RerunVerificationButton availableProjectIds={projectIds} /> : <Link href={nextAction.href} className="inline-flex items-center px-4 py-2.5 rounded-md bg-accent text-black font-tech uppercase tracking-[0.12em] text-xs font-bold hover:brightness-110 shadow-glow">{nextAction.cta}</Link>}
+              {nextAction.href === "/verification" ? <RerunVerificationButton availableProjects={availableProjects} metadataUnavailable={projectMetaUnavailable} /> : <Link href={nextAction.href} className="inline-flex items-center px-4 py-2.5 rounded-md bg-accent text-black font-tech uppercase tracking-[0.12em] text-xs font-bold hover:brightness-110 shadow-glow">{nextAction.cta}</Link>}
             </div>
           </div>
           <div className="mt-4 space-y-2 text-xs text-muted">
@@ -227,7 +254,7 @@ export default async function VerificationSection() {
               <tbody className="divide-y divide-border">
                 {allRecords.map((r) => {
                   const invs = investigationsForRecord(r, investigations);
-                  const project = projectMeta.get(r.projectId || "") || { id: r.projectId || "default", name: r.projectId || "Default project", repo: null };
+                  const project = projectMeta.get(r.projectId || "") || { id: r.projectId || "default", name: "Unknown project", repo: null };
                   const plain = outcomePlain(r.outcome);
                   const infra = isInfraOutcome(r.outcome) || isIncomplete(r.outcome);
                   return (
@@ -262,11 +289,11 @@ export default async function VerificationSection() {
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
-                          <h3 className="text-sm md:text-base font-semibold text-fg">{inv.title}</h3>
+                          <h3 className="text-sm md:text-base font-semibold text-rose-200">{inv.title}</h3>
                           <span className={`inline-flex items-center text-[11px] font-tech uppercase tracking-[0.12em] px-2 py-1 rounded border ${severityTone(inv.severity)}`}>{severityLabel(inv.severity)}</span>
                           <StatusBadge status={inv.status === "resolved" ? "completed" : "failed"} />
                         </div>
-                        <p className="mt-2 text-sm text-muted leading-relaxed">{inv.simpleExplanation || "A genuine issue was detected by a real check."}</p>
+                        <p className="mt-2 text-sm text-rose-100/90 leading-relaxed">{inv.simpleExplanation || "A genuine issue was detected by a real check."}</p>
                       </div>
                       <div className="text-xs text-muted shrink-0">Last seen: {fmtDate(inv.lastDetectedAt)}</div>
                     </div>
@@ -274,7 +301,7 @@ export default async function VerificationSection() {
                       <div className="rounded border border-border bg-panel-2/20 p-3"><div className="text-muted uppercase tracking-[0.12em]">Why it matters</div><div className="mt-1 text-fg/90 leading-relaxed">{inv.actualBehaviour ? `What happened: ${inv.actualBehaviour}` : "This behavior was not confirmed to work as expected."}</div></div>
                       <div className="rounded border border-border bg-panel-2/20 p-3"><div className="text-muted uppercase tracking-[0.12em]">Affected area</div><div className="mt-1 text-fg/90 leading-relaxed">{inv.affectedAreas?.length ? inv.affectedAreas.join(", ") : "Not identified from available evidence."}</div></div>
                     </div>
-                    <div className="mt-3 text-xs text-muted">Resolution status: <span className="text-fg font-medium">{inv.status === "open" ? "Open - needs attention" : inv.status === "resolved" ? "Resolved by subsequent evidence" : "Superseded"}</span></div>
+                    <div className="mt-3 text-xs text-muted">Resolution status: <span className={inv.status === "open" ? "text-rose-300 font-medium" : "text-fg font-medium"}>{inv.status === "open" ? "Open - needs attention" : inv.status === "resolved" ? "Resolved by subsequent evidence" : "Superseded"}</span></div>
                     {linkedRecord ? <a href={`#record-${linkedRecord.id}`} className="text-xs text-accent underline mt-2 inline-block">View related verification result</a> : null}
                     <details className="mt-3 text-xs text-muted"><summary className="cursor-pointer text-accent">Evidence and technical details</summary>
                       <div className="mt-2 space-y-3">
@@ -297,7 +324,7 @@ export default async function VerificationSection() {
           ) : (
             <div className="space-y-3">
               {[...incompleteRecords, ...infraRecords].map((r) => {
-                const project = projectMeta.get(r.projectId || "") || { id: r.projectId || "default", name: r.projectId || "Default project", repo: null };
+                const project = projectMeta.get(r.projectId || "") || { id: r.projectId || "default", name: "Unknown project", repo: null };
                 const cause = infraCause(r);
                 return (
                   <div key={r.id} id={`blocked-${r.id}`} className="rounded-lg border border-amber-500/20 bg-amber-500/[0.03] p-4">
@@ -321,7 +348,7 @@ export default async function VerificationSection() {
           <div className="space-y-3">
             {allRecords.map((r) => {
               const invs = investigationsForRecord(r, investigations);
-              const project = projectMeta.get(r.projectId || "") || { id: r.projectId || "default", name: r.projectId || "Default project", repo: null };
+              const project = projectMeta.get(r.projectId || "") || { id: r.projectId || "default", name: "Unknown project", repo: null };
               const plain = outcomePlain(r.outcome);
               return (
                 <article key={r.id} id={`record-${r.id}`} className="rounded-lg border border-border bg-panel-2/20 p-4">

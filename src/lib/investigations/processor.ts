@@ -31,7 +31,7 @@ export function isActionableVerification(record: VerificationRecord): boolean {
 }
 
 export function isResolutionEvidence(record: VerificationRecord): boolean {
-  return record.outcome === "passed" && record.exitCode === 0 && Boolean(record.runEnd);
+  return record.outcome === "passed" && record.exitCode === 0 && record.runEnd?.type === "run_end" && record.runEnd.status === "passed";
 }
 
 /**

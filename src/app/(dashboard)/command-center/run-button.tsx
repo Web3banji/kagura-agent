@@ -20,7 +20,7 @@ export function RunPipelineButton() {
         setIsError(true);
         setMsg(data.error || "Something went wrong. Please try again.");
       } else if (data.draft) {
-        setMsg(`Report ready to review: "${data.draft.title}". Open "Reports" to review the published report.`);
+        setMsg(`Report ready to review: "${data.draft.title}". Open "Reports" to review the report.`);
       } else {
         setMsg(data.state?.note || "Run finished. Check the status below for details.");
       }

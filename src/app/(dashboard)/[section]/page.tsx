@@ -1,5 +1,5 @@
 import { notFound } from "next/navigation";
-import { CommandCenterSection } from "@/components/dashboard/CommandCenterSection";
+import OverviewSection from "@/components/dashboard/OverviewSection";
 import ProjectsSection from "@/components/dashboard/ProjectsSection";
 import VerificationSection from "@/components/dashboard/VerificationSection";
 import ReportsSection from "@/components/dashboard/ReportsSection";
@@ -17,7 +17,7 @@ export default async function DashboardSectionPage({
 }) {
   switch (params.section) {
     case "command-center":
-      return <CommandCenterSection searchParams={searchParams} />;
+      return <OverviewSection />;
     case "projects":
       return <ProjectsSection />;
     case "verification":

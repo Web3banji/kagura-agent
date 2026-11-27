@@ -1,4 +1,5 @@
 import type { VerificationRecord } from "@/types/verification";
+import type { Investigation } from "@/types/investigation";
 
 export interface GenerateArticleInput {
   titleHint: string;
@@ -173,10 +174,10 @@ function templateArticle(input: GenerateArticleInput): GeneratedArticle {
 }
 
 export async function generateArticle(input: GenerateArticleInput): Promise<GeneratedArticle> {
-  const provider = (process.env.AI_PROVIDER || "").toLowerCase();
+  const provider = (process.env.AI_PROVIDER || "").trim().toLowerCase();
   const hasOpenAI = !!process.env.OPENAI_API_KEY;
   const hasAnthropic = !!process.env.ANTHROPIC_API_KEY;
-  const useProvider = provider === "anthropic" ? "anthropic" : provider === "openai" ? "openai" : hasAnthropic ? "anthropic" : hasOpenAI ? "openai" : null;
+  const useProvider = provider === "anthropic" ? "anthropic" : provider === "openai" ? "openai" : provider ? null : hasAnthropic ? "anthropic" : hasOpenAI ? "openai" : null;
 
   if (!useProvider) return templateArticle(input);
 
@@ -200,10 +201,131 @@ export async function generateArticle(input: GenerateArticleInput): Promise<Gene
   return templateArticle(input);
 }
 
+export interface GeminiReportInput {
+  record: VerificationRecord;
+  investigations: Investigation[];
+  projectName?: string | null;
+}
+
+export interface GeminiReportResult {
+  provider: "gemini";
+  model: string;
+  body: string;
+}
+
+function geminiKey(): string | null {
+  return process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || ((process.env.AI_PROVIDER || "").trim().toLowerCase() === "gemini" ? process.env.AI_API_KEY || null : null);
+}
+
+export function resolveGeminiConfig(): { configured: boolean; model: string; keySource: "GEMINI_API_KEY" | "GOOGLE_API_KEY" | "AI_API_KEY" | null } {
+  const keySource = process.env.GEMINI_API_KEY
+    ? "GEMINI_API_KEY"
+    : process.env.GOOGLE_API_KEY
+      ? "GOOGLE_API_KEY"
+      : (process.env.AI_PROVIDER || "").trim().toLowerCase() === "gemini" && process.env.AI_API_KEY
+        ? "AI_API_KEY"
+        : null;
+  const model = (process.env.GEMINI_MODEL || process.env.AI_MODEL || "gemini-2.0-flash").trim();
+  return { configured: !!keySource && !!model, model, keySource };
+}
+
+function buildGeminiPrompt(input: GeminiReportInput): string {
+  const r = input.record;
+  const issues = input.investigations.length
+    ? input.investigations
+        .map((inv) =>
+          [
+            `Title: ${inv.title}`,
+            `Severity: ${inv.severity || "not rated"}`,
+            `Status: ${inv.status}`,
+            `Simple explanation: ${inv.simpleExplanation || "not recorded"}`,
+            `Technical explanation: ${inv.technicalExplanation || "not recorded"}`,
+            inv.affectedAreas?.length ? `Affected areas: ${inv.affectedAreas.join(", ")}` : null,
+            inv.expectedBehaviour ? `Expected: ${inv.expectedBehaviour}` : null,
+            inv.actualBehaviour ? `Actual: ${inv.actualBehaviour}` : null,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        )
+        .join("\n\n")
+    : "No confirmed investigation records are linked to this verification run.";
+
+  return [
+    "You are KAGURA's reporting assistant. Write a factual, evidence-grounded verification analysis for a developer.",
+    "STRICT RULES:",
+    "- Use ONLY the verification record and investigation data provided below.",
+    "- Never invent vulnerabilities, findings, file paths, test results, outcomes, or project details.",
+    "- If the evidence is insufficient, state that limitation explicitly.",
+    "- Do not claim a failed, blocked, did_not_start, or timeout run is a pass.",
+    "- Clearly separate original verification facts from your interpretation.",
+    "- Return Markdown only. Do not wrap the response in JSON or code fences.",
+    "",
+    `Project: ${input.projectName || "not recorded"}`,
+    `Verification ID: ${r.id}`,
+    `Job ID: ${r.jobId || "not recorded"}`,
+    `Flow: ${r.flow || "not recorded"}`,
+    `Outcome: ${r.outcome}`,
+    `Exit code: ${r.exitCode ?? "not recorded"}`,
+    `Started: ${r.startedAt}`,
+    `Finished: ${r.finishedAt || "not recorded"}`,
+    `Summary: ${r.summary || "not recorded"}`,
+    `Failing step: ${r.failingStep || "not recorded"}`,
+    `Target URL: ${r.url || "not recorded"}`,
+    `Evidence path: ${r.evidencePath || "not recorded"}`,
+    "",
+    "Investigations (actual linked records):",
+    issues,
+    "",
+    "Produce these sections: What was verified; Overall result; Detected issues; Why they matter; Potential impact; Priority; Recommendations; Next steps; Evidence limitations.",
+  ].join("\n");
+}
+
+export async function generateGeminiVerificationReport(input: GeminiReportInput): Promise<GeminiReportResult> {
+  const config = resolveGeminiConfig();
+  const key = geminiKey();
+  if (!key || !config.configured) {
+    throw new Error("Gemini is not configured on the server. Set GEMINI_API_KEY or GOOGLE_API_KEY, or set AI_PROVIDER=gemini with AI_API_KEY.");
+  }
+  const model = config.model;
+  let res: Response;
+  try {
+    res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts: [{ text: buildGeminiPrompt(input) }] }],
+        generationConfig: { temperature: 0.2, maxOutputTokens: 2200 },
+      }),
+    });
+  } catch {
+    throw new Error("Gemini request could not reach the server. Check server network access and Gemini configuration.");
+  }
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      throw new Error("Gemini authentication failed. Check the server-side Gemini credential configuration.");
+    }
+    if (res.status === 404) {
+      throw new Error(`Gemini model ${model} is unavailable. Configure GEMINI_MODEL or AI_MODEL with a supported model.`);
+    }
+    throw new Error(`Gemini request failed (${res.status}) for model ${model}. Check server Gemini configuration and model availability.`);
+  }
+  let data: { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+  try {
+    data = await res.json() as typeof data;
+  } catch {
+    throw new Error("Gemini returned an invalid response.");
+  }
+  const body = (data.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("\n").trim();
+  if (!body) throw new Error("Gemini returned no analysis.");
+  return { provider: "gemini", model, body };
+}
+
 export function aiConfigured(): { configured: boolean; provider: string | null } {
-  const provider = (process.env.AI_PROVIDER || "").toLowerCase();
-  if (provider === "anthropic" && process.env.ANTHROPIC_API_KEY) return { configured: true, provider: "anthropic" };
-  if (provider === "openai" && process.env.OPENAI_API_KEY) return { configured: true, provider: "openai" };
+  const provider = (process.env.AI_PROVIDER || "").trim().toLowerCase();
+  if (provider === "gemini") return { configured: !!geminiKey(), provider: "gemini" };
+  if (provider === "anthropic") return { configured: !!process.env.ANTHROPIC_API_KEY, provider: "anthropic" };
+  if (provider === "openai") return { configured: !!process.env.OPENAI_API_KEY, provider: "openai" };
+  if (geminiKey()) return { configured: true, provider: "gemini" };
   if (process.env.ANTHROPIC_API_KEY) return { configured: true, provider: "anthropic" };
   if (process.env.OPENAI_API_KEY) return { configured: true, provider: "openai" };
   return { configured: false, provider: null };

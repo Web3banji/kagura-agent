@@ -8,6 +8,26 @@ export interface StoryCommit {
   author?: string;
 }
 
+export interface StoryAiReport {
+  provider: string;
+  model?: string;
+  generatedAt: string;
+  body: string;
+}
+
+export interface StoryVerificationIssue {
+  id: string;
+  title: string;
+  severity?: string | null;
+  status: string;
+  simpleExplanation: string;
+  technicalExplanation: string;
+  affectedAreas?: string[] | null;
+  expectedBehaviour?: string | null;
+  actualBehaviour?: string | null;
+  aiFixPrompt?: string | null;
+}
+
 export interface Story {
   id: string;
   slug: string;
@@ -22,6 +42,8 @@ export interface Story {
   publishedAt?: string;
   rejectedAt?: string;
   generationSource?: "ai" | "template";
+  reportKind?: "verification" | "project";
+  aiReport?: StoryAiReport | null;
   source: {
     repo?: string;
     commits: StoryCommit[];
@@ -42,6 +64,7 @@ export interface Story {
     ndjsonPath?: string;
     flow?: string;
     url?: string;
+    issues?: StoryVerificationIssue[];
   };
   tags: string[];
 }

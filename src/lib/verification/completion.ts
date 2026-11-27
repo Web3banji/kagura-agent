@@ -3,7 +3,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { AccessDeniedError } from "@/lib/auth/scope";
 import type { VerificationJob, VerificationJobResult, VerificationJobStatus, VerificationOutcome, VerificationRecord } from "@/types/verification";
-import { readVerificationRecords } from "./store";
+import { mutateVerificationRecords, readVerificationRecords } from "./store";
 import { getJob, resolvePersistedJobOwner, updateJob } from "./jobs";
 
 const DATA_DIR = path.join(process.cwd(), "data", "verification");
@@ -73,7 +73,21 @@ export type CompletionInput = {
   finishedAt: string;
 };
 
-export type CompletionOutput = { job: VerificationJob; record: VerificationRecord; idempotent: boolean };
+export type CompletionOutput = { job: VerificationJob; record: VerificationRecord; idempotent: boolean; report?: { created: boolean; error?: string } };
+
+function reportFailureMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function logReportCreationFailure(error: unknown, jobId: string, record: VerificationRecord): void {
+  console.error(JSON.stringify({
+    event: "verification_report_create_failed",
+    jobId,
+    verificationId: record.id,
+    projectId: record.projectId ?? null,
+    error: reportFailureMessage(error),
+  }));
+}
 
 export async function completeJobAtomically(input: CompletionInput): Promise<CompletionOutput> {
   if (hasDatabase()) return completeJobAtomicallyDb(input);
@@ -184,7 +198,18 @@ async function completeJobAtomicallyDb(input: CompletionInput): Promise<Completi
     }
 
     await client.query("COMMIT");
-    return { job: rowToJobLite(jobUpdate.rows[0] as Record<string, unknown>), record: merged, idempotent: false };
+    let report: { created: boolean; error?: string } | undefined;
+    try {
+      const { ensureVerificationReport } = await import("@/lib/reports/store");
+      const reportStory = await ensureVerificationReport(merged);
+      if (!reportStory) throw new Error("verification report was not created");
+      report = { created: true };
+    } catch (error) {
+      const message = reportFailureMessage(error);
+      logReportCreationFailure(error, job.id, merged);
+      report = { created: false, error: message };
+    }
+    return { job: rowToJobLite(jobUpdate.rows[0] as Record<string, unknown>), record: merged, idempotent: false, report };
   } catch (e) {
     try { await client.query("ROLLBACK"); } catch {}
     throw e;
@@ -197,11 +222,6 @@ async function readRecordsFile(): Promise<VerificationRecord[]> {
   if (!canUseLocalFs()) throw new Error("Durable verification record storage is not configured (DATABASE_URL missing in production).");
   await ensureDir();
   try { const raw = await fs.readFile(RECORDS_FILE, "utf8"); const p = JSON.parse(raw); return Array.isArray(p) ? p : []; } catch { return []; }
-}
-async function writeRecordsFile(records: VerificationRecord[]): Promise<void> {
-  if (!canUseLocalFs()) throw new Error("Durable verification record storage is not configured (DATABASE_URL missing in production).");
-  await ensureDir();
-  await fs.writeFile(RECORDS_FILE, JSON.stringify(records.slice(0, 500), null, 2), "utf8");
 }
 
 async function completeJobFencedFile(input: CompletionInput): Promise<CompletionOutput> {
@@ -243,11 +263,12 @@ async function completeJobFencedFile(input: CompletionInput): Promise<Completion
     await writeReservations(reservations);
   }
 
-  const records = await readRecordsFile();
-  const idx = records.findIndex(r => r.id === expectedRecordId || r.jobId === job.id);
-  const merged = mergeRecord(idx >= 0 ? records[idx] : undefined, { ...record, id: expectedRecordId, jobId: job.id, projectId: fresh.projectId, requestedBy: owner }, { expectOwner: owner, expectedJobId: job.id, expectedProjectId: (fresh.projectId || null), expectedRecordId, allowReplay: true });
-  if (idx >= 0) records[idx] = merged; else records.unshift(merged);
-  await writeRecordsFile(records);
+  const merged = await mutateVerificationRecords(fresh.projectId, (records) => {
+    const idx = records.findIndex(r => r.id === expectedRecordId || r.jobId === job.id);
+    const next = mergeRecord(idx >= 0 ? records[idx] : undefined, { ...record, id: expectedRecordId, jobId: job.id, projectId: fresh.projectId, requestedBy: owner }, { expectOwner: owner, expectedJobId: job.id, expectedProjectId: (fresh.projectId || null), expectedRecordId, allowReplay: true });
+    if (idx >= 0) records[idx] = next; else records.unshift(next);
+    return { records, value: next };
+  });
 
   const reservations2 = await readReservations();
   const res2 = reservations2.find(r => r.jobId === job.id);
@@ -278,7 +299,17 @@ async function completeJobFencedFile(input: CompletionInput): Promise<Completion
       // File fallback has no cross-file transaction; finalized completion stands, outbox can be re-enqueued by recovery.
     }
   }
-  return { job: updated, record: merged, idempotent: false };
+  let report: { created: boolean; error?: string } | undefined;
+  try {
+    const { ensureVerificationReport } = await import("@/lib/reports/store");
+    await ensureVerificationReport(merged);
+    report = { created: true };
+  } catch (error) {
+    const message = reportFailureMessage(error);
+    logReportCreationFailure(error, job.id, merged);
+    report = { created: false, error: message };
+  }
+  return { job: updated, record: merged, idempotent: false, report };
 }
 
 
